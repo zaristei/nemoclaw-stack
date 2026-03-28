@@ -1,6 +1,6 @@
 [submodule "openshell"]
 	path = openshell
-	url = https://github.com/NVIDIA/OpenShell.git
+	url = https://github.com/zaristei/OpenShell.git
 [submodule "nemoclaw"]
 	path = nemoclaw
-	url = https://github.com/NVIDIA/NemoClaw.git
+	url = https://github.com/zaristei/NemoClaw.git
