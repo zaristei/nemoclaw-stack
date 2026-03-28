@@ -1,0 +1,40 @@
+# LiteLLM Proxy Config
+#
+# Source files (do not edit litellm_config.built.yaml directly):
+#   models.yaml            — model list (edit to add/swap models)
+#   trusted_providers.yaml — OpenRouter western-only whitelist (edit to add/remove providers)
+#   litellm_config.yaml    — router + general settings (this file)
+#
+# Build:  python3 /Volumes/macmini1/scripts/build_litellm_config.py
+# Run:    litellm --config /Volumes/macmini1/config/litellm/litellm_config.built.yaml
+#
+# Required env vars (all in /Volumes/macmini1/config/litellm/.env):
+#   ANTHROPIC_API_KEY    ← active
+#   OPENAI_API_KEY       ← active
+#   GOOGLE_API_KEY       ← active
+#   XAI_API_KEY          ← active
+#   MISTRAL_API_KEY      ← active
+#   OPENROUTER_API_KEY   ← active (NVIDIA + all non-sensitive open-weight/Chinese)
+#   NVIDIA_API_KEY       ← optional (get from build.nvidia.com for direct NIM inference)
+
+# ============================================================
+# ROUTER SETTINGS
+# ============================================================
+router_settings:
+  routing_strategy: simple-shuffle
+  num_retries: 3
+  retry_after: 2
+  cooldown_time: 300
+
+  fallbacks:
+    - tier-opus-sensitive: ["tier-sonnet-sensitive"]
+    - tier-opus-nonsensitive: ["tier-sonnet-nonsensitive"]
+    - tier-sonnet-sensitive: ["tier-haiku-sensitive"]
+    - tier-sonnet-nonsensitive: ["tier-haiku-nonsensitive"]
+
+# ============================================================
+# GENERAL SETTINGS
+# ============================================================
+litellm_settings:
+  drop_params: true
+  request_timeout: 60

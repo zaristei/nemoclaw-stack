@@ -1,0 +1,279 @@
+# Model list — edit this file to add/remove/swap models.
+# Run scripts/build_litellm_config.py after changes to rebuild litellm_config.built.yaml.
+#
+# 3 tiers x 2 sensitivity levels = 6 model groups:
+#   Sensitive:     Western providers only (Anthropic, OpenAI, Google, xAI, Mistral, NVIDIA)
+#   Non-sensitive: Superset — inherits sensitive + adds open-weight/Chinese via OpenRouter
+#
+# YAML anchors: sensitive entries are anchored (&name), non-sensitive
+# entries inherit via merge (<<: *name) and override only model_name.
+# To update a model/key, edit the sensitive anchor — non-sensitive updates automatically.
+#
+# Priority order within each group: top = highest priority (tried first)
+# Models are tried top-to-bottom on failure/rate-limit
+#
+# ⚠️  Model IDs marked "verify" may need confirming against provider docs —
+#     LiteLLM 1.82.6 pricing data predates some of these models.
+#
+# OpenRouter sensitive-tier guard (anchored as &or-sensitive-guard):
+#   provider.order: western-only whitelist — see trusted_providers.yaml.
+#   Whitelist preferred over blacklist: new Chinese providers (incl. SG-incorporated)
+#   are excluded by default without requiring list maintenance.
+#   allow_fallbacks: false — hard-fail if no whitelisted provider can serve the request;
+#     LiteLLM tier fallbacks (opus→sonnet→haiku) still apply at the tier level.
+#   data_collection: deny — training opt-out signal.
+#   zdr: true — require contractual zero-retention (belt-and-suspenders).
+
+model_list:
+
+  # ============================================================
+  # OPUS TIER — SENSITIVE (anchored)
+  # Best capability, western providers only
+  # ============================================================
+  - &opus-anthropic
+    model_name: tier-opus-sensitive
+    litellm_params:
+      model: claude-opus-4-6
+      api_key: os.environ/ANTHROPIC_API_KEY
+
+  - &opus-openai
+    model_name: tier-opus-sensitive
+    litellm_params:
+      model: openai/gpt-5.4                          # verify: exact API name
+      api_key: os.environ/OPENAI_API_KEY
+
+  - &opus-google
+    model_name: tier-opus-sensitive
+    litellm_params:
+      model: gemini/gemini-3.1-pro-preview
+      api_key: os.environ/GOOGLE_API_KEY
+
+  - &opus-xai
+    model_name: tier-opus-sensitive
+    litellm_params:
+      model: xai/grok-4.20                           # verify: exact API name
+      api_key: os.environ/XAI_API_KEY
+
+  - &opus-mistral
+    model_name: tier-opus-sensitive
+    litellm_params:
+      model: mistral/mistral-large-latest
+      api_key: os.environ/MISTRAL_API_KEY
+
+  # - &opus-nvidia                                        # PENDING: Nemotron 3 Ultra (550B/55B active)
+  #   model_name: tier-opus-sensitive                    # announced GTC 2026, expected H1 2026
+  #   litellm_params:
+  #     model: openrouter/nvidia/nemotron-3-ultra-550b-a55b  # verify: ID not yet on OpenRouter
+  #     api_key: os.environ/OPENROUTER_API_KEY
+  #     extra_body: *or-sensitive-guard
+
+  # ============================================================
+  # OPUS TIER — NON-SENSITIVE
+  # Inherits sensitive + open-weight/Chinese via OpenRouter
+  # ============================================================
+  - <<: *opus-anthropic
+    model_name: tier-opus-nonsensitive
+
+  - <<: *opus-openai
+    model_name: tier-opus-nonsensitive
+
+  - <<: *opus-google
+    model_name: tier-opus-nonsensitive
+
+  - <<: *opus-xai
+    model_name: tier-opus-nonsensitive
+
+  - <<: *opus-mistral
+    model_name: tier-opus-nonsensitive
+
+  # <<: *opus-nvidia — omitted until Nemotron 3 Ultra is available
+
+  - model_name: tier-opus-nonsensitive
+    litellm_params:
+      model: openrouter/deepseek/deepseek-v3.2        # DeepSeek V3.2 — latest available
+      api_key: os.environ/OPENROUTER_API_KEY
+
+  - model_name: tier-opus-nonsensitive
+    litellm_params:
+      model: openrouter/qwen/qwen3.5-397b-a17b           # Qwen3.5 flagship
+      api_key: os.environ/OPENROUTER_API_KEY
+
+  - model_name: tier-opus-nonsensitive
+    litellm_params:
+      model: openrouter/moonshotai/kimi-k2.5         # Kimi K2.5 multimodal
+      api_key: os.environ/OPENROUTER_API_KEY
+
+  # ============================================================
+  # SONNET TIER — SENSITIVE (anchored)
+  # Balanced capability/cost, western providers only
+  # ============================================================
+  - &sonnet-anthropic
+    model_name: tier-sonnet-sensitive
+    litellm_params:
+      model: claude-sonnet-4-6
+      api_key: os.environ/ANTHROPIC_API_KEY
+
+  - &sonnet-openai
+    model_name: tier-sonnet-sensitive
+    litellm_params:
+      model: openai/gpt-5.4-mini                     # verify: exact API name
+      api_key: os.environ/OPENAI_API_KEY
+
+  - &sonnet-google
+    model_name: tier-sonnet-sensitive
+    litellm_params:
+      model: gemini/gemini-3-flash-preview
+      api_key: os.environ/GOOGLE_API_KEY
+
+  - &sonnet-xai
+    model_name: tier-sonnet-sensitive
+    litellm_params:
+      model: xai/grok-4.20                           # verify: exact API name
+      api_key: os.environ/XAI_API_KEY
+
+  - &sonnet-mistral
+    model_name: tier-sonnet-sensitive
+    litellm_params:
+      model: mistral/mistral-small-2603              # Mistral Small 4 — Mar 2026
+      api_key: os.environ/MISTRAL_API_KEY
+
+  - &sonnet-nvidia
+    model_name: tier-sonnet-sensitive
+    litellm_params:
+      model: openrouter/nvidia/nemotron-3-super-120b-a12b
+      api_key: os.environ/OPENROUTER_API_KEY
+      extra_body: &or-sensitive-guard
+        provider:
+          order: []  # populated from trusted_providers.yaml by build_litellm_config.py
+          allow_fallbacks: false
+          data_collection: deny
+          zdr: true
+
+  # ============================================================
+  # SONNET TIER — NON-SENSITIVE
+  # Inherits sensitive + open-weight/Chinese via OpenRouter
+  # ============================================================
+  - <<: *sonnet-anthropic
+    model_name: tier-sonnet-nonsensitive
+
+  - <<: *sonnet-openai
+    model_name: tier-sonnet-nonsensitive
+
+  - <<: *sonnet-google
+    model_name: tier-sonnet-nonsensitive
+
+  - <<: *sonnet-xai
+    model_name: tier-sonnet-nonsensitive
+
+  - <<: *sonnet-mistral
+    model_name: tier-sonnet-nonsensitive
+
+  - <<: *sonnet-nvidia
+    model_name: tier-sonnet-nonsensitive
+
+  - model_name: tier-sonnet-nonsensitive
+    litellm_params:
+      model: openrouter/deepseek/deepseek-v3.2       # DeepSeek V3.2
+      api_key: os.environ/OPENROUTER_API_KEY
+
+  - model_name: tier-sonnet-nonsensitive
+    litellm_params:
+      model: openrouter/qwen/qwen3.5-122b-a10b       # Qwen3.5 122B
+      api_key: os.environ/OPENROUTER_API_KEY
+
+  - model_name: tier-sonnet-nonsensitive
+    litellm_params:
+      model: openrouter/z-ai/glm-4.7                  # GLM 4.7 — very cheap
+      api_key: os.environ/OPENROUTER_API_KEY
+
+  - model_name: tier-sonnet-nonsensitive
+    litellm_params:
+      model: openrouter/meta-llama/llama-3.3-70b-instruct  # Llama 3.3 70B
+      api_key: os.environ/OPENROUTER_API_KEY
+
+  # ============================================================
+  # HAIKU TIER — SENSITIVE (anchored)
+  # Fast + cheap, western providers only
+  # ============================================================
+  - &haiku-anthropic
+    model_name: tier-haiku-sensitive
+    litellm_params:
+      model: claude-haiku-4-5-20251001
+      api_key: os.environ/ANTHROPIC_API_KEY
+
+  - &haiku-openai
+    model_name: tier-haiku-sensitive
+    litellm_params:
+      model: openai/gpt-5.4-nano                     # verify: exact API name
+      api_key: os.environ/OPENAI_API_KEY
+
+  - &haiku-google
+    model_name: tier-haiku-sensitive
+    litellm_params:
+      model: gemini/gemini-3.1-flash-lite-preview
+      api_key: os.environ/GOOGLE_API_KEY
+
+  - &haiku-xai
+    model_name: tier-haiku-sensitive
+    litellm_params:
+      model: xai/grok-4-fast                         # verify: exact API name
+      api_key: os.environ/XAI_API_KEY
+
+  - &haiku-mistral
+    model_name: tier-haiku-sensitive
+    litellm_params:
+      model: mistral/mistral-small-2603              # Mistral Small 4 — Mar 2026
+      api_key: os.environ/MISTRAL_API_KEY
+
+  # - &haiku-nvidia                                        # PENDING: Nemotron 3 Nano (30B/3.2B active)
+  #   model_name: tier-haiku-sensitive                    # released GTC 2026, not yet on OpenRouter
+  #   litellm_params:
+  #     model: openrouter/nvidia/nemotron-3-nano-30b-a3b  # verify: ID not yet on OpenRouter
+  #     api_key: os.environ/OPENROUTER_API_KEY
+  #     extra_body: *or-sensitive-guard
+
+  # ============================================================
+  # HAIKU TIER — NON-SENSITIVE
+  # Inherits sensitive + cheap/free open-weight via OpenRouter
+  # ============================================================
+  - <<: *haiku-anthropic
+    model_name: tier-haiku-nonsensitive
+
+  - <<: *haiku-openai
+    model_name: tier-haiku-nonsensitive
+
+  - <<: *haiku-google
+    model_name: tier-haiku-nonsensitive
+
+  - <<: *haiku-xai
+    model_name: tier-haiku-nonsensitive
+
+  - <<: *haiku-mistral
+    model_name: tier-haiku-nonsensitive
+
+  # <<: *haiku-nvidia — omitted until Nemotron 3 Nano is on OpenRouter
+
+  - model_name: tier-haiku-nonsensitive
+    litellm_params:
+      model: openrouter/deepseek/deepseek-v3.2       # DeepSeek V3.2
+      api_key: os.environ/OPENROUTER_API_KEY
+
+  - model_name: tier-haiku-nonsensitive
+    litellm_params:
+      model: openrouter/qwen/qwen3.5-9b              # Qwen3.5 9B — very cheap
+      api_key: os.environ/OPENROUTER_API_KEY
+
+  - model_name: tier-haiku-nonsensitive
+    litellm_params:
+      model: openrouter/meta-llama/llama-3.1-8b-instruct  # Llama 3.1 8B
+      api_key: os.environ/OPENROUTER_API_KEY
+
+  - model_name: tier-haiku-nonsensitive
+    litellm_params:
+      model: openrouter/z-ai/glm-4.7-flash           # GLM 4.7 Flash
+      api_key: os.environ/OPENROUTER_API_KEY
+
+  - model_name: tier-haiku-nonsensitive
+    litellm_params:
+      model: openrouter/minimax/minimax-m2.5:free    # MiniMax free tier
+      api_key: os.environ/OPENROUTER_API_KEY

@@ -1,0 +1,54 @@
+# Western-only OpenRouter provider whitelist — sensitive-tier guard.
+# Edit here; run scripts/build_litellm_config.py before restarting LiteLLM.
+#
+# Excluded gray-area providers:
+#   nebius      — ex-Yandex/Russian origins (NL-registered since 2024)
+#   phala       — conflicting CN/SG/US location reports
+#   mancer      — no disclosed HQ or ownership
+#   inception   — UAE (G42), documented CN tech ties through ~2024
+#   upstage     — Korean (not Chinese, but not Western)
+#
+# nvidia listed first — preferred compute for NVIDIA model entries.
+- nvidia
+- openai
+- anthropic
+- google-vertex
+- google-ai-studio
+- azure
+- amazon-bedrock
+- amazon-nova
+- mistral
+- cohere
+- xai
+- groq
+- together
+- fireworks
+- deepinfra
+- sambanova
+- cerebras
+- perplexity
+- ai21
+- aion-labs
+- arcee-ai
+- featherless
+- hyperbolic
+- crusoe
+- cloudflare
+- baseten
+- friendli
+- novita
+- venice
+- parasail
+- gmicloud
+- clarifai
+- wandb
+- modular
+- inceptron
+- black-forest-labs
+- liquid
+- reka
+- inflection
+- akashml
+- chutes
+- ionstream
+- inference-net
