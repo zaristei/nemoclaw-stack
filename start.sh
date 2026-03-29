@@ -1,20 +1,37 @@
 #!/usr/bin/env bash
-# Start nemoclaw-stack services via Colima + Docker Compose.
+# Start nemoclaw-stack: build local OpenShell, install NemoClaw deps, boot services.
 #
 # Usage:
-#   ./start.sh              # start all services
-#   ./start.sh litellm      # start specific service
-#   ./start.sh down          # stop everything
-#   ./start.sh ps            # show status
+#   ./start.sh              # build + start all services
+#   ./start.sh down         # stop everything
+#   ./start.sh ps           # show status
+#   ./start.sh logs         # tail logs
+#
+# Override storage root (default: /Volumes/macmini1):
+#   STACK_ROOT=/somewhere/else ./start.sh
 set -euo pipefail
 
-export COLIMA_HOME=/Volumes/macmini1/config/colima
-export DOCKER_HOST=unix://${COLIMA_HOME}/default/docker.sock
-
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+
+# ── Storage root — all state, build artifacts, and tool installs land here ──
+export STACK_ROOT="${STACK_ROOT:-/Volumes/macmini1}"
+
+# ── Paths ────────────────────────────────────────────────────────────────────
+export COLIMA_HOME="${STACK_ROOT}/config/colima"
+export DOCKER_HOST="unix://${COLIMA_HOME}/default/docker.sock"
+export XDG_CONFIG_HOME="${STACK_ROOT}/config"       # OpenShell state (kubeconfig, etc.)
+export NEMOCLAW_HOME="${STACK_ROOT}/state/nemoclaw"  # NemoClaw state (~/.nemoclaw)
+export CARGO_TARGET_DIR="${STACK_ROOT}/build/openshell/target"  # Rust build artifacts
+export MISE_DATA_DIR="${STACK_ROOT}/mise"            # mise tool installs
+export OPENSHELL_CLUSTER_IMAGE="openshell/cluster:local"
+
+OPENSHELL_DIR="${SCRIPT_DIR}/openshell"
+NEMOCLAW_DIR="${SCRIPT_DIR}/nemoclaw"
 COMPOSE="docker compose -f ${SCRIPT_DIR}/docker-compose.yml"
 
-# Ensure docker-compose CLI plugin is linked
+log() { echo "▶ $*"; }
+
+# ── docker-compose plugin ─────────────────────────────────────────────────────
 if ! docker compose version &>/dev/null; then
     prefix="$(brew --prefix 2>/dev/null)/opt/docker-compose/bin/docker-compose"
     if [[ -x "$prefix" ]]; then
@@ -26,27 +43,55 @@ if ! docker compose version &>/dev/null; then
     fi
 fi
 
-# Start Colima if not running
+# Short-circuit for non-up commands — no build needed
+case "${1:-up}" in
+    down|ps|logs)
+        $COMPOSE "${@}" 2>/dev/null || true
+        exit 0
+        ;;
+esac
+
+# ── Colima ────────────────────────────────────────────────────────────────────
 if ! colima status &>/dev/null; then
-    echo "Starting Colima..."
+    log "Starting Colima..."
     colima start
 fi
 
-# Rebuild litellm config if sources are newer than built output
+# ── LiteLLM config ────────────────────────────────────────────────────────────
 BUILT="${SCRIPT_DIR}/services/litellm/config/litellm_config.built.yaml"
 if [[ ! -f "$BUILT" ]] || \
    [[ "${SCRIPT_DIR}/services/litellm/config/models.yaml" -nt "$BUILT" ]] || \
    [[ "${SCRIPT_DIR}/services/litellm/config/litellm_config.yaml" -nt "$BUILT" ]] || \
    [[ "${SCRIPT_DIR}/services/litellm/config/trusted_providers.yaml" -nt "$BUILT" ]]; then
-    echo "Rebuilding litellm config..."
+    log "Rebuilding LiteLLM config..."
     python3 "${SCRIPT_DIR}/scripts/build_litellm_config.py"
 fi
 
-# Dispatch
-case "${1:-up}" in
-    down)   $COMPOSE down "${@:2}" ;;
-    ps)     $COMPOSE ps "${@:2}" ;;
-    logs)   $COMPOSE logs "${@:2}" ;;
-    up)     $COMPOSE up -d "${@:2}" ;;
-    *)      $COMPOSE up -d "$@" ;;
-esac
+# ── OpenShell: build CLI binary ───────────────────────────────────────────────
+log "Building OpenShell CLI (incremental)..."
+(
+    cd "${OPENSHELL_DIR}"
+    mise trust mise.toml &>/dev/null || true
+    mise exec -- cargo build --release -p openshell-cli
+)
+
+# Prepend built binary to PATH for this session and any child processes
+export PATH="${CARGO_TARGET_DIR}/release:${PATH}"
+
+# ── OpenShell: build cluster image ────────────────────────────────────────────
+log "Building OpenShell cluster image (cached)..."
+(
+    cd "${OPENSHELL_DIR}"
+    IMAGE_TAG=local mise exec -- ./tasks/scripts/docker-build-image.sh cluster
+)
+
+# ── NemoClaw: install dependencies ───────────────────────────────────────────
+LOCK="${NEMOCLAW_DIR}/node_modules/.package-lock.json"
+if [[ ! -f "$LOCK" ]] || [[ "${NEMOCLAW_DIR}/package.json" -nt "$LOCK" ]]; then
+    log "Installing NemoClaw dependencies..."
+    npm install --prefix "${NEMOCLAW_DIR}"
+fi
+
+# ── Compose: bring up services ────────────────────────────────────────────────
+log "Starting services..."
+$COMPOSE up -d "${@:1}"
