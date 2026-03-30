@@ -7,3 +7,4 @@ __pycache__/
 dist/
 build/
 litellm_config.built.yaml
+**/.DS_Store
