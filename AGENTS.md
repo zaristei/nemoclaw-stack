@@ -10,8 +10,8 @@ This repo orchestrates NemoClaw and OpenShell services for local development and
 | `nemoclaw/` | NemoClaw submodule — do not edit directly, work in `~/repos/NemoClaw` |
 | `services/litellm/` | LiteLLM proxy config and env |
 | `services/approval-bridge/` | Python webhook-to-Telegram bridge |
-| `scripts/` | Build and utility scripts |
-| `start.sh` | Colima + compose launcher |
+| `scripts/` | Build, config, and secrets scripts |
+| `stack.sh` | Unified CLI: start, stop, ps, health |
 
 ## Submodule Workflow
 
@@ -28,20 +28,24 @@ This repo orchestrates NemoClaw and OpenShell services for local development and
 
 ## Services
 
-- Services run via Docker Compose through Colima.
-- Use `./start.sh` to manage the stack. It handles Colima lifecycle and config rebuilds.
-- Colima home is `/Volumes/macmini1/config/colima` — do not use the default `~/.colima` path.
+- All services run natively (no Docker Compose). LiteLLM runs as a Python process, approval bridge has its own launcher.
+- Use `./stack.sh start` to build and boot everything, `./stack.sh stop` to tear down.
+- All state, builds, and tool installs live under `STACK_ROOT` (default: `/Volumes/macmini1`).
+- Colima home is `$STACK_ROOT/nemoclaw-stack/colima` — do not use the default `~/.colima` path.
 
 ## Secrets
 
 - Never commit `.env` files. They are gitignored.
 - Use `.env.example` files as templates.
-- API keys live in `services/litellm/.env`. Telegram/webhook secrets live in `.env` at repo root.
+- API keys can live in `services/litellm/.env` (default) or macOS Keychain (service: `nemoclaw-stack`).
+- To import keys into Keychain: `./scripts/store-secrets.sh`
+- To use Keychain at startup: `./stack.sh start --secrets keychain`
+- Telegram/webhook secrets live in `.env` at repo root.
 
 ## Testing
 
+- Stack health (LiteLLM + all providers + Docker network): `./stack.sh health`
 - Approval bridge: `cd services/approval-bridge && python3 -m pytest test_bridge.py`
-- LiteLLM: start the proxy and test with `curl http://localhost:4000/v1/chat/completions`
 
 ## Commits
 
