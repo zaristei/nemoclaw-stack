@@ -9,7 +9,7 @@ This repo orchestrates NemoClaw and OpenShell services for local development and
 | `openshell/` | OpenShell submodule — do not edit directly, work in `~/repos/OpenShell` |
 | `nemoclaw/` | NemoClaw submodule — do not edit directly, work in `~/repos/NemoClaw` |
 | `services/litellm/` | LiteLLM proxy config and env |
-| `services/approval-bridge/` | Python webhook-to-Telegram bridge |
+| `services/approval-bridge/` | Python webhook-to-Telegram bridge (chunks + policy proposals) |
 | `scripts/` | Build, config, and secrets scripts |
 | `stack.sh` | Unified CLI: start, stop, ps, health |
 
@@ -41,6 +41,15 @@ This repo orchestrates NemoClaw and OpenShell services for local development and
 - To import keys into Keychain: `./scripts/store-secrets.sh`
 - To use Keychain at startup: `./stack.sh start --secrets keychain`
 - Telegram/webhook secrets live in `.env` at repo root.
+
+## Mediator
+
+- The mediator is a UDS-based syscall mediation layer built into `openshell-sandbox`.
+- It runs as a daemon alongside the OpenShell gateway, managing workflow namespaces, IPC, signals, and HTTP egress.
+- `./stack.sh start` builds and starts the mediator automatically.
+- Socket: `$STACK_DATA/state/mediator.sock`, DB: `$STACK_DATA/state/mediator.db`.
+- The approval bridge handles `mediator_policy_proposal` events for Telegram-based policy approval.
+- Poll `/policy-decisions` on the bridge to retrieve proposal outcomes.
 
 ## Testing
 

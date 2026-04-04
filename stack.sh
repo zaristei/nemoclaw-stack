@@ -39,6 +39,10 @@ LITELLM_PID="${STACK_DATA}/state/litellm.pid"
 LITELLM_LOG="${STACK_DATA}/logs/litellm.log"
 LITELLM_CONFIG="${SCRIPT_DIR}/services/litellm/config/litellm_config.built.yaml"
 BRIDGE_PID="${STACK_DATA}/state/approval-bridge.pid"
+MEDIATOR_PID="${STACK_DATA}/state/mediator.pid"
+MEDIATOR_LOG="${STACK_DATA}/logs/mediator.log"
+MEDIATOR_SOCK="${STACK_DATA}/state/mediator.sock"
+MEDIATOR_DB="${STACK_DATA}/state/mediator.db"
 
 log() { echo "▶ $*"; }
 
@@ -109,11 +113,19 @@ cmd_ps() {
         bridge_status="not running"
     fi
 
+    local mediator_status
+    if [[ -f "$MEDIATOR_PID" ]] && kill -0 "$(cat "$MEDIATOR_PID")" 2>/dev/null; then
+        mediator_status="running (pid $(cat "$MEDIATOR_PID"))"
+    else
+        mediator_status="not running"
+    fi
+
     echo "Colima:    ${colima_status}"
     echo "LiteLLM:   ${litellm_status}"
     echo "Gateway:   ${gateway_status}"
     echo "Sandbox:   ${sandbox_status}"
     echo "Bridge:    ${bridge_status}"
+    echo "Mediator:  ${mediator_status}"
 }
 
 # ── HEALTH ───────────────────────────────────────────────────────────────────
@@ -248,6 +260,27 @@ cmd_start() {
     )
     export PATH="${CARGO_TARGET_DIR}/release:${PATH}"
 
+    # ── OpenShell: build mediator ──────────────────────────────────────────
+    log "Building OpenShell mediator (incremental)..."
+    (
+        cd "${OPENSHELL_DIR}"
+        mise exec -- cargo build --release -p openshell-sandbox
+    )
+
+    # ── Mediator daemon ────────────────────────────────────────────────────
+    if [[ -f "$MEDIATOR_PID" ]] && kill -0 "$(cat "$MEDIATOR_PID")" 2>/dev/null; then
+        log "Mediator already running (pid $(cat "$MEDIATOR_PID"))"
+    else
+        log "Starting mediator daemon..."
+        mkdir -p "$(dirname "$MEDIATOR_LOG")" "$(dirname "$MEDIATOR_PID")"
+        nohup "${CARGO_TARGET_DIR}/release/openshell-sandbox" mediator \
+            --socket "$MEDIATOR_SOCK" \
+            --db "sqlite://${MEDIATOR_DB}?mode=rwc" \
+            > "$MEDIATOR_LOG" 2>&1 &
+        echo $! > "$MEDIATOR_PID"
+        log "Mediator started (pid $!, socket: $MEDIATOR_SOCK)"
+    fi
+
     # ── OpenShell: build cluster image ──────────────────────────────────────
     log "Building OpenShell cluster image (cached)..."
     (
@@ -331,6 +364,9 @@ cmd_stop() {
             openshell gateway destroy -g nemoclaw 2>/dev/null || true
         fi
     fi
+
+    # ── Mediator ────────────────────────────────────────────────────────────
+    _stop_pid_file "$MEDIATOR_PID" "mediator"
 
     # ── Approval Bridge ─────────────────────────────────────────────────────
     _stop_pid_file "$BRIDGE_PID" "approval bridge"

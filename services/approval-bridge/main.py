@@ -43,6 +43,9 @@ LISTEN_PORT = int(os.environ.get("LISTEN_PORT", "8090"))
 # Maps chunk_id -> chunk info dict (sandbox_id, rule_name, host, port, etc.)
 pending_chunks: dict[str, dict[str, Any]] = {}
 
+# Maps proposal_id -> policy proposal info dict
+pending_proposals: dict[str, dict[str, Any]] = {}
+
 
 # ---------------------------------------------------------------------------
 # HMAC verification
@@ -76,6 +79,8 @@ async def handle_webhook(request: web.Request) -> web.Response:
         return web.Response(status=400, text="invalid json")
 
     event = payload.get("event", "")
+    if event == "mediator_policy_proposal":
+        return await _handle_policy_proposal(request, payload)
     if event != "draft_chunks_proposed":
         log.info("Ignoring event: %s", event)
         return web.Response(status=200, text="ignored")
@@ -150,6 +155,62 @@ async def handle_webhook(request: web.Request) -> web.Response:
     return web.Response(status=200, text="")
 
 
+async def _handle_policy_proposal(
+    request: web.Request, payload: dict[str, Any]
+) -> web.Response:
+    """Handle a mediator policy proposal — send to Telegram for approval."""
+    proposal_id = payload.get("proposal_id", "")
+    if not proposal_id:
+        return web.Response(status=400, text="missing proposal_id")
+
+    policy_config = payload.get("config", {})
+    policy_name = policy_config.get("policy_name", "unknown")
+    rationale = policy_config.get("rationale", "")
+    http_allowlist = policy_config.get("http_allowlist", [])
+    bind_ports = policy_config.get("bind_ports", [])
+
+    pending_proposals[proposal_id] = {
+        "config": policy_config,
+        "policy_name": policy_name,
+    }
+
+    text = (
+        f"🔒 Policy Proposal\n"
+        f"Name: <b>{_escape(policy_name)}</b>\n"
+        f"Rationale: {_escape(rationale)}\n"
+        f"HTTP allowlist: <code>{_escape(', '.join(http_allowlist[:5]))}</code>\n"
+    )
+    if bind_ports:
+        text += f"Ports: <code>{bind_ports[0]}–{bind_ports[1]}</code>\n"
+
+    keyboard = InlineKeyboardMarkup(
+        [
+            [
+                InlineKeyboardButton(
+                    "Approve", callback_data=f"policy_approve:{proposal_id}"
+                ),
+                InlineKeyboardButton(
+                    "Deny", callback_data=f"policy_deny:{proposal_id}"
+                ),
+            ]
+        ]
+    )
+
+    app = request.app["telegram_app"]
+    try:
+        await app.bot.send_message(
+            chat_id=TELEGRAM_CHAT_ID,
+            text=text,
+            parse_mode="HTML",
+            reply_markup=keyboard,
+        )
+    except Exception:
+        log.exception("Failed to send policy proposal to Telegram")
+
+    log.info("Policy proposal %s for '%s' sent to Telegram", proposal_id, policy_name)
+    return web.Response(status=200, text="")
+
+
 def _escape(text: str) -> str:
     """Escape HTML special characters for Telegram."""
     return (
@@ -175,7 +236,35 @@ async def handle_button(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     if ":" not in data:
         return
 
-    action, chunk_id = data.split(":", 1)
+    action, item_id = data.split(":", 1)
+
+    # Handle policy proposals.
+    if action in ("policy_approve", "policy_deny"):
+        proposal_info = pending_proposals.pop(item_id, None)
+        if proposal_info is None:
+            await query.edit_message_text("Proposal already decided or expired.")
+            return
+        user = query.from_user
+        actor = f"telegram:{user.id}" if user else "telegram:unknown"
+        policy_name = proposal_info.get("policy_name", "unknown")
+        approved = action == "policy_approve"
+        status_text = "approved" if approved else "denied"
+        await query.edit_message_text(
+            f"Policy <b>{_escape(policy_name)}</b> {status_text} by {actor}.",
+            parse_mode="HTML",
+        )
+        log.info("Policy %s %s by %s", item_id, status_text, actor)
+        context.bot_data.setdefault("policy_decisions", []).append(
+            {
+                "proposal_id": item_id,
+                "approved": approved,
+                "reason": f"{status_text} by {actor}",
+            }
+        )
+        return
+
+    # Handle chunk approvals.
+    chunk_id = item_id
     chunk_info = pending_chunks.pop(chunk_id, None)
 
     if chunk_info is None:
@@ -202,9 +291,6 @@ async def handle_button(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         rule_name,
     )
 
-    # The decision is recorded in pending state. When OpenShell polls or
-    # the bridge is extended with a callback URL, decisions get pushed back.
-    # For now, store decisions for retrieval via the /decisions endpoint.
     context.bot_data.setdefault("decisions", []).append(
         {
             "chunk_id": chunk_id,
@@ -220,9 +306,16 @@ async def handle_button(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
 
 
 async def handle_decisions(request: web.Request) -> web.Response:
-    """Return and flush pending decisions."""
+    """Return and flush pending chunk decisions."""
     app = request.app["telegram_app"]
     decisions = app.bot_data.pop("decisions", [])
+    return web.json_response({"decisions": decisions})
+
+
+async def handle_policy_decisions(request: web.Request) -> web.Response:
+    """Return and flush pending policy proposal decisions."""
+    app = request.app["telegram_app"]
+    decisions = app.bot_data.pop("policy_decisions", [])
     return web.json_response({"decisions": decisions})
 
 
@@ -249,6 +342,7 @@ async def run() -> None:
     http_app["telegram_app"] = telegram_app
     http_app.router.add_post("/webhook", handle_webhook)
     http_app.router.add_get("/decisions", handle_decisions)
+    http_app.router.add_get("/policy-decisions", handle_policy_decisions)
     http_app.router.add_get("/health", lambda _: web.Response(text="ok"))
 
     runner = web.AppRunner(http_app)
