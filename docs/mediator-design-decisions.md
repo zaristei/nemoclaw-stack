@@ -454,6 +454,69 @@ revoke_policy("helper_v1")
 /revoke scraper_v1     → hard revoke, kill affected workflows
 ```
 
+## Policy Design Guideline: The Lethal Trifecta
+
+The three capabilities that, when combined in a single workflow, enable
+data exfiltration via prompt injection (per Simon Willison):
+
+1. **Private data access** — the workflow can read sensitive files/APIs
+2. **Untrusted content exposure** — the workflow processes attacker-controlled
+   text (web pages, API responses, user input)
+3. **External communication** — the workflow can send data out (HTTP requests)
+
+If any one leg is missing, the attack chain breaks. A workflow with private
+data access but no HTTP can't exfiltrate. A workflow with HTTP but no private
+data has nothing to steal.
+
+### Guideline for policy proposals
+
+When designing policies, prefer splitting workflows so no single policy
+holds all three legs:
+
+```yaml
+# GOOD: separate reader and fetcher
+data_reader_v1:
+  external_mounts: [{ path: "/data/sensitive", mode: "r" }]
+  http_allowlist: []              # no network → can't exfiltrate
+
+web_fetcher_v1:
+  external_mounts: []             # no private data → nothing to steal
+  http_allowlist: ["*.example.com"]
+
+# They communicate via ipc_send. The mediator's content inspection
+# layer can scan IPC messages for PII before relaying.
+```
+
+```yaml
+# RISKY: single workflow with all three legs
+research_agent_v1:
+  external_mounts: [{ path: "/data/sensitive", mode: "r" }]
+  http_allowlist: ["*.example.com"]
+  # → attacker-controlled content from example.com could trigger
+  #   exfiltration of /data/sensitive back to example.com
+```
+
+This is a **guideline, not a hard enforcement**. The operator may have good
+reasons to combine all three (convenience, performance, trusted endpoints).
+The approval channel should surface a warning when a policy proposal combines
+private data access with external communication, so the operator makes an
+informed decision.
+
+Agents (especially init) should use this guideline when designing policy
+proposals — structuring workflows to break the trifecta where possible.
+
+### Note on http_request syscall
+
+The `http_request` syscall is redundant with the L7 proxy for autonomous
+workflows (the proxy already enforces per-UID policy). However, it serves
+as a **human gate mechanism for init** — every outbound request init makes
+flows through the mediator, where the operator must approve it. Without it,
+init could curl directly through the proxy (which allows everything per
+init's wildcard policy).
+
+For autonomous workflows, HTTP goes directly through the proxy. No syscall
+needed.
+
 ## Init Process
 
 Init is the first process spawned by the sandbox. It is the agent's coordinator
