@@ -119,8 +119,8 @@ cmd_ps() {
     fi
 
     local mediator_status
-    if [[ -f "$MEDIATOR_PID" ]] && kill -0 "$(cat "$MEDIATOR_PID")" 2>/dev/null; then
-        mediator_status="running (pid $(cat "$MEDIATOR_PID"))"
+    if [[ -S "$MEDIATOR_SOCK" ]]; then
+        mediator_status="embedded (socket: $MEDIATOR_SOCK)"
     else
         mediator_status="not running"
     fi
@@ -272,19 +272,16 @@ cmd_start() {
         mise exec -- cargo build --release -p openshell-sandbox
     )
 
-    # ── Mediator daemon ────────────────────────────────────────────────────
-    if [[ -f "$MEDIATOR_PID" ]] && kill -0 "$(cat "$MEDIATOR_PID")" 2>/dev/null; then
-        log "Mediator already running (pid $(cat "$MEDIATOR_PID"))"
-    else
-        log "Starting mediator daemon..."
-        mkdir -p "$(dirname "$MEDIATOR_LOG")" "$(dirname "$MEDIATOR_PID")"
-        nohup "${CARGO_TARGET_DIR}/release/openshell-sandbox" mediator \
-            --socket "$MEDIATOR_SOCK" \
-            --db "sqlite://${MEDIATOR_DB}?mode=rwc" \
-            > "$MEDIATOR_LOG" 2>&1 &
-        echo $! > "$MEDIATOR_PID"
-        log "Mediator started (pid $!, socket: $MEDIATOR_SOCK)"
+    # ── Mediator env (embedded in sandbox process) ──────────────────────────
+    # The mediator now runs inside the sandbox binary. Export env vars so the
+    # sandbox process can bootstrap it.
+    export MEDIATOR_SOCKET="$MEDIATOR_SOCK"
+    export MEDIATOR_DB="sqlite://${MEDIATOR_DB}?mode=rwc"
+    if [[ -n "${APPROVAL_BOT_TOKEN:-}" ]]; then
+        export APPROVAL_BRIDGE_URL="http://localhost:8090"
     fi
+    mkdir -p "$(dirname "$MEDIATOR_SOCK")" "$(dirname "$MEDIATOR_DB")"
+    log "Mediator will start embedded in sandbox (socket: $MEDIATOR_SOCK)"
 
     # ── OpenShell: build cluster image ──────────────────────────────────────
     log "Building OpenShell cluster image (cached)..."
@@ -380,8 +377,10 @@ cmd_stop() {
         fi
     fi
 
-    # ── Mediator ────────────────────────────────────────────────────────────
-    _stop_pid_file "$MEDIATOR_PID" "mediator"
+    # ── Mediator (embedded — no separate PID) ─────────────────────────────
+    # Mediator is now embedded in the sandbox process; no separate stop needed.
+    # Clean up stale socket/pid files if they exist from previous runs.
+    rm -f "$MEDIATOR_PID" "$MEDIATOR_SOCK" 2>/dev/null
 
     # ── Approval Bridge ─────────────────────────────────────────────────────
     _stop_pid_file "$BRIDGE_PID" "approval bridge"

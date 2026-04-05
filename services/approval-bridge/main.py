@@ -46,6 +46,9 @@ pending_chunks: dict[str, dict[str, Any]] = {}
 # Maps proposal_id -> policy proposal info dict
 pending_proposals: dict[str, dict[str, Any]] = {}
 
+# Maps approval_id -> syscall approval info dict
+pending_syscalls: dict[str, dict[str, Any]] = {}
+
 
 # ---------------------------------------------------------------------------
 # HMAC verification
@@ -81,6 +84,8 @@ async def handle_webhook(request: web.Request) -> web.Response:
     event = payload.get("event", "")
     if event == "mediator_policy_proposal":
         return await _handle_policy_proposal(request, payload)
+    if event == "mediator_syscall_approval":
+        return await _handle_syscall_approval(request, payload)
     if event != "draft_chunks_proposed":
         log.info("Ignoring event: %s", event)
         return web.Response(status=200, text="ignored")
@@ -211,6 +216,66 @@ async def _handle_policy_proposal(
     return web.Response(status=200, text="")
 
 
+async def _handle_syscall_approval(
+    request: web.Request, payload: dict[str, Any]
+) -> web.Response:
+    """Handle an init syscall approval request — send to Telegram for approval."""
+    approval_id = payload.get("approval_id", "")
+    if not approval_id:
+        return web.Response(status=400, text="missing approval_id")
+
+    method = payload.get("method", "unknown")
+    params = payload.get("params", {})
+    policy_name = payload.get("policy_name", "unknown")
+    caller = payload.get("caller", "unknown")
+
+    pending_syscalls[approval_id] = {
+        "method": method,
+        "params": params,
+        "policy_name": policy_name,
+    }
+
+    # Summarize params for display.
+    params_summary = json.dumps(params, indent=None, default=str)
+    if len(params_summary) > 200:
+        params_summary = params_summary[:200] + "..."
+
+    text = (
+        f"⚡ Syscall Approval Request\n"
+        f"Caller: <b>{_escape(caller)}</b>\n"
+        f"Method: <b>{_escape(method)}</b>\n"
+        f"Policy: <code>{_escape(policy_name)}</code>\n"
+        f"Params: <code>{_escape(params_summary)}</code>"
+    )
+
+    keyboard = InlineKeyboardMarkup(
+        [
+            [
+                InlineKeyboardButton(
+                    "Approve", callback_data=f"syscall_approve:{approval_id}"
+                ),
+                InlineKeyboardButton(
+                    "Deny", callback_data=f"syscall_deny:{approval_id}"
+                ),
+            ]
+        ]
+    )
+
+    app = request.app["telegram_app"]
+    try:
+        await app.bot.send_message(
+            chat_id=TELEGRAM_CHAT_ID,
+            text=text,
+            parse_mode="HTML",
+            reply_markup=keyboard,
+        )
+    except Exception:
+        log.exception("Failed to send syscall approval to Telegram")
+
+    log.info("Syscall approval %s for '%s' sent to Telegram", approval_id, method)
+    return web.Response(status=200, text="")
+
+
 def _escape(text: str) -> str:
     """Escape HTML special characters for Telegram."""
     return (
@@ -240,6 +305,31 @@ async def handle_button(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         return
 
     action, item_id = data.split(":", 1)
+
+    # Handle syscall approvals.
+    if action in ("syscall_approve", "syscall_deny"):
+        syscall_info = pending_syscalls.pop(item_id, None)
+        if syscall_info is None:
+            await query.edit_message_text("Syscall approval already decided or expired.")
+            return
+        user = query.from_user
+        actor = f"telegram:{user.id}" if user else "telegram:unknown"
+        method = syscall_info.get("method", "unknown")
+        approved = action == "syscall_approve"
+        status_text = "approved" if approved else "denied"
+        await query.edit_message_text(
+            f"Syscall <b>{_escape(method)}</b> {status_text} by {actor}.",
+            parse_mode="HTML",
+        )
+        log.info("Syscall %s %s by %s", item_id, status_text, actor)
+        context.bot_data.setdefault("syscall_decisions", []).append(
+            {
+                "approval_id": item_id,
+                "approved": approved,
+                "reason": f"{status_text} by {actor}",
+            }
+        )
+        return
 
     # Handle policy proposals.
     if action in ("policy_approve", "policy_deny"):
@@ -322,6 +412,13 @@ async def handle_policy_decisions(request: web.Request) -> web.Response:
     return web.json_response({"decisions": decisions})
 
 
+async def handle_syscall_decisions(request: web.Request) -> web.Response:
+    """Return and flush pending syscall approval decisions."""
+    app = request.app["telegram_app"]
+    decisions = app.bot_data.pop("syscall_decisions", [])
+    return web.json_response({"decisions": decisions})
+
+
 # ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
@@ -346,6 +443,7 @@ async def run() -> None:
     http_app.router.add_post("/webhook", handle_webhook)
     http_app.router.add_get("/decisions", handle_decisions)
     http_app.router.add_get("/policy-decisions", handle_policy_decisions)
+    http_app.router.add_get("/syscall-decisions", handle_syscall_decisions)
     http_app.router.add_get("/health", lambda _: web.Response(text="ok"))
 
     runner = web.AppRunner(http_app)
