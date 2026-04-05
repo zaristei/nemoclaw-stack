@@ -186,16 +186,31 @@ Why retain chain: revocation needs to know which workflows are affected.
 
 ### iptables rules per workflow
 
+Three OUTPUT rules per UID. No blanket loopback ACCEPT — that would let
+workflows connect to each other's listening ports on localhost.
+
 ```bash
-# Outbound: only allow proxy
+# Outbound: only allow proxy + responses
 iptables -A OUTPUT -m owner --uid-owner {uid} -d 127.0.0.1 -p tcp --dport 3128 -j ACCEPT
-iptables -A OUTPUT -m owner --uid-owner {uid} -o lo -j ACCEPT
 iptables -A OUTPUT -m owner --uid-owner {uid} -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT
 iptables -A OUTPUT -m owner --uid-owner {uid} -j REJECT
 
 # Inbound: only allocated ports (added by request_port)
 iptables -A INPUT -p tcp --dport {port} -j ACCEPT  # global, first-come-first-served
 ```
+
+Why this works:
+
+- **Proxy (port 3128)**: explicitly allowed. All HTTP goes through it.
+- **Cross-workflow**: UID 60002 tries `connect(127.0.0.1:8080)` where UID
+  60001 is listening → REJECT by rule 3. Packet never reaches 60001.
+- **Responses**: proxy responds to UID 60002's allowed connection → matches
+  ESTABLISHED (part of a connection 60002 initiated) → ACCEPT.
+- **Mediator**: uses Unix domain socket, not TCP. iptables doesn't filter
+  UDS traffic. Access controlled by filesystem permissions on socket file.
+- **Inbound from gateway**: SSH tunnel delivers to `127.0.0.1:{port}` →
+  INPUT chain, not OUTPUT. No per-UID INPUT blocking needed — the gateway
+  already authenticated the connection via SSH.
 
 ### Proxy integration (SO_PEERCRED)
 
