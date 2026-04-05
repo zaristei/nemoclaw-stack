@@ -502,6 +502,12 @@ The approval channel should surface a warning when a policy proposal combines
 private data access with external communication, so the operator makes an
 informed decision.
 
+> **TODO:** Consider stricter enforcement options — e.g., requiring an explicit
+> `acknowledge_trifecta: true` flag in policies that combine all three legs,
+> automatic PII scanning on outbound HTTP for trifecta policies, or hard-blocking
+> trifecta policies unless the operator provides a justification. The right level
+> of enforcement depends on operational experience with real workflows.
+
 Agents (especially init) should use this guideline when designing policy
 proposals — structuring workflows to break the trifecta where possible.
 
