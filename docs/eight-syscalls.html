@@ -1,0 +1,625 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Nine Syscalls for an AI Agent Sandbox</title>
+<link href="https://fonts.googleapis.com/css2?family=Crimson+Pro:ital,wght@0,400;0,500;0,600;0,700;1,400;1,500&family=DM+Mono:wght@400;500&display=swap" rel="stylesheet">
+<style>
+  :root {
+    --bg: #f6f3ee;
+    --bg-code: #2b2d31;
+    --surface: #ffffff;
+    --border: #e2ddd5;
+    --border-dark: #ccc5ba;
+    --text: #2c2a26;
+    --text-secondary: #5c5850;
+    --text-dim: #8a8478;
+    --accent: #b44d2d;
+    --accent-light: #b44d2d15;
+    --accent-mid: #b44d2d30;
+    --blue: #2d6b8a;
+    --blue-light: #2d6b8a12;
+    --green: #3d7a4a;
+    --green-light: #3d7a4a12;
+    --yellow: #8a7a2d;
+    --yellow-light: #8a7a2d12;
+    --purple: #6a4b8a;
+    --purple-light: #6a4b8a12;
+    --code-text: #e0ddd8;
+    --code-keyword: #e07a5f;
+    --code-string: #81b29a;
+    --code-comment: #6b7280;
+  }
+
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+
+  body {
+    background: var(--bg);
+    color: var(--text);
+    font-family: 'Crimson Pro', Georgia, serif;
+    font-size: 19px;
+    line-height: 1.75;
+    -webkit-font-smoothing: antialiased;
+  }
+
+  .page {
+    max-width: 720px;
+    margin: 0 auto;
+    padding: 80px 24px 120px;
+  }
+
+  .post-header {
+    margin-bottom: 64px;
+    padding-bottom: 40px;
+    border-bottom: 2px solid var(--border);
+  }
+
+  .post-meta {
+    font-family: 'DM Mono', monospace;
+    font-size: 0.7rem;
+    color: var(--text-dim);
+    text-transform: uppercase;
+    letter-spacing: 0.12em;
+    margin-bottom: 20px;
+  }
+
+  h1 {
+    font-size: 2.4rem;
+    font-weight: 700;
+    line-height: 1.2;
+    color: var(--text);
+    letter-spacing: -0.02em;
+    margin-bottom: 20px;
+  }
+
+  .post-subtitle {
+    font-size: 1.15rem;
+    font-style: italic;
+    color: var(--text-secondary);
+    line-height: 1.6;
+  }
+
+  h2 {
+    font-size: 1.5rem;
+    font-weight: 700;
+    color: var(--text);
+    margin: 56px 0 20px;
+    letter-spacing: -0.01em;
+  }
+
+  h3 {
+    font-size: 1.15rem;
+    font-weight: 600;
+    color: var(--text);
+    margin: 40px 0 12px;
+  }
+
+  p { margin-bottom: 18px; color: var(--text); }
+  strong { font-weight: 600; color: var(--text); }
+  em { font-style: italic; }
+
+  code {
+    font-family: 'DM Mono', monospace;
+    font-size: 0.82em;
+    background: var(--border);
+    padding: 2px 6px;
+    border-radius: 3px;
+    color: var(--text);
+  }
+
+  pre {
+    background: var(--bg-code);
+    border-radius: 6px;
+    padding: 20px 24px;
+    margin: 24px 0;
+    overflow-x: auto;
+    line-height: 1.55;
+    border: 1px solid #3a3c42;
+  }
+
+  pre code {
+    background: none;
+    padding: 0;
+    border-radius: 0;
+    color: var(--code-text);
+    font-size: 0.78em;
+  }
+
+  .kw { color: var(--code-keyword); }
+  .str { color: var(--code-string); }
+  .cmt { color: var(--code-comment); font-style: italic; }
+  .type { color: #f2cc8f; }
+
+  .callout {
+    border-left: 3px solid var(--accent);
+    padding: 16px 20px;
+    margin: 32px 0;
+    background: var(--accent-light);
+    border-radius: 0 6px 6px 0;
+  }
+
+  .callout p { font-size: 0.95rem; margin-bottom: 0; color: var(--text); }
+
+  .callout-blue {
+    border-left: 3px solid var(--blue);
+    padding: 16px 20px;
+    margin: 32px 0;
+    background: var(--blue-light);
+    border-radius: 0 6px 6px 0;
+  }
+
+  .callout-blue p { font-size: 0.95rem; margin-bottom: 0; color: var(--text); }
+
+  .divider {
+    width: 40px;
+    height: 2px;
+    background: var(--border-dark);
+    margin: 56px 0;
+  }
+
+  .syscall-card {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 28px 28px 24px;
+    margin: 28px 0;
+    position: relative;
+    overflow: hidden;
+  }
+
+  .syscall-card::before {
+    content: '';
+    position: absolute;
+    top: 0;
+    left: 0;
+    width: 4px;
+    height: 100%;
+  }
+
+  .syscall-card.net::before { background: var(--blue); }
+  .syscall-card.policy::before { background: var(--accent); }
+  .syscall-card.proc::before { background: var(--purple); }
+  .syscall-card.ipc::before { background: var(--green); }
+  .syscall-card.info::before { background: var(--yellow); }
+
+  .syscall-card h3 {
+    font-family: 'DM Mono', monospace;
+    font-size: 1rem;
+    font-weight: 500;
+    margin: 0 0 6px;
+    color: var(--text);
+  }
+
+  .syscall-card .sig {
+    font-family: 'DM Mono', monospace;
+    font-size: 0.75rem;
+    color: var(--text-secondary);
+    margin-bottom: 14px;
+    padding-bottom: 14px;
+    border-bottom: 1px solid var(--border);
+    line-height: 1.5;
+  }
+
+  .syscall-card p { font-size: 0.95rem; margin-bottom: 10px; }
+  .syscall-card p:last-child { margin-bottom: 0; }
+
+  .workflow {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 28px;
+    margin: 28px 0;
+  }
+
+  .workflow-num {
+    font-family: 'DM Mono', monospace;
+    font-size: 0.65rem;
+    font-weight: 500;
+    text-transform: uppercase;
+    letter-spacing: 0.1em;
+    color: var(--text-dim);
+    margin-bottom: 6px;
+  }
+
+  .workflow h3 { margin: 0 0 6px; font-size: 1.1rem; }
+
+  .workflow .challenge {
+    font-size: 0.88rem;
+    color: var(--accent);
+    font-style: italic;
+    margin-bottom: 12px;
+    padding-bottom: 12px;
+    border-bottom: 1px solid var(--border);
+  }
+
+  .workflow .resolution { font-size: 0.95rem; }
+
+  .diagram {
+    background: var(--bg-code);
+    border-radius: 6px;
+    padding: 28px 24px;
+    margin: 32px 0;
+    font-family: 'DM Mono', monospace;
+    font-size: 0.72rem;
+    color: var(--code-text);
+    line-height: 1.7;
+    overflow-x: auto;
+    white-space: pre;
+    border: 1px solid #3a3c42;
+  }
+
+  .post-footer {
+    margin-top: 64px;
+    padding-top: 32px;
+    border-top: 2px solid var(--border);
+    font-size: 0.88rem;
+    color: var(--text-dim);
+    font-style: italic;
+  }
+
+  @media (max-width: 600px) {
+    body { font-size: 17px; }
+    h1 { font-size: 1.8rem; }
+    .page { padding: 48px 18px 80px; }
+    .syscall-card, .workflow { padding: 20px; }
+    pre { padding: 16px; }
+  }
+</style>
+</head>
+<body>
+<div class="page">
+
+<header class="post-header">
+  <div class="post-meta">Architecture Notes &middot; April 2026</div>
+  <h1>Nine Syscalls for an AI Agent Sandbox</h1>
+  <p class="post-subtitle">Reasoning from Linux kernel primitives to a minimal, complete API for an agentic AI runtime &mdash; and discovering along the way why the kernel has so many syscalls.</p>
+</header>
+
+<!-- =============================== FIRST PRINCIPLES =============================== -->
+
+<h2>Starting From the Kernel</h2>
+
+<p>In a Linux system, processes don't get to decide what they can access. The kernel assigns identity, enforces permissions, and mediates every interaction with the outside world. A process can't spoof its UID because the kernel derives it from its own internal <code>task_struct</code> &mdash; a data structure the process cannot read or write. When a process makes a syscall, the kernel already knows who's calling. Identity is never carried in-band with the request.</p>
+
+<p>We asked: what happens if you apply the same model to an AI agent running inside a sandbox? The agent (analogous to a userspace process) should be able to reason, plan, and execute workflows &mdash; but every interaction with resources outside its sandbox should cross a trust boundary, mediated by a sandbox layer that acts as the kernel.</p>
+
+<p>The first question was: what's the minimal set of "syscalls" the agent needs? We started from what an agent actually does &mdash; makes API calls, reads and writes files, spawns sub-tasks, requests new capabilities &mdash; and mapped each to a Linux syscall family. Then we tried to collapse as many as possible.</p>
+
+<h3>Identity Without Spoofing</h3>
+
+<p>The foundational problem: how does the sandbox know which process is making a request? In the kernel, this is solved by the hardware trap into ring 0 &mdash; the kernel derives the caller's identity from the CPU state, not from anything the process provides. In userspace, we use <code>SO_PEERCRED</code> &mdash; a Linux socket option that lets the sandbox query the real PID and UID of the process on the other end of a Unix domain socket. The agent can put whatever it wants in the JSON payload; the sandbox ignores it and checks the socket credential. Identity is kernel-verified, not self-asserted.</p>
+
+<h3>What Doesn't Need a Syscall</h3>
+
+<p>Our first instinct was to create syscalls for everything &mdash; vault reads, vault writes, device access, context injection, message sending. But most of these are just filesystem operations. If the sandbox sets up the agent's namespace with the right mounts and permissions at startup, the agent can access them normally. No mediation needed for internal resources.</p>
+
+<p>We identified three categories:</p>
+
+<p><strong>Pre-opened resources</strong> (no syscall): Telegram output channel, working directory, namespace outboxes. These are file descriptors or directories available at startup.</p>
+
+<p><strong>Namespace-scoped resources</strong> (no syscall): Binaries, scripts, vault files, local databases. Provisioned via SELinux at fork time. The agent accesses them through normal filesystem operations at native performance.</p>
+
+<p><strong>Cross-boundary operations</strong> (syscall required): Outbound network requests, spawning isolated workflows, requesting new capabilities, communicating across namespace boundaries, sending signals to other workflows. These are the only things that need sandbox mediation.</p>
+
+<!-- =============================== ARCHITECTURE =============================== -->
+
+<div class="divider"></div>
+<h2>The Architecture</h2>
+
+<p>The system runs on three OS-level users. <code>jarvis-agent</code> is the untrusted party &mdash; it runs the LLM-driven agent process. <code>jarvis-sandbox</code> is the policy enforcer &mdash; it mediates every syscall and holds the capability tables in memory. <code>jarvis-daemon</code> is the human proxy &mdash; it owns the Telegram bot, the config files, and the approval workflow. No UID can do what the others can.</p>
+
+<div class="diagram">┌──────────────────────────────────────────────────────────────┐
+│  <span class="str">Mac Mini Host</span>                                                │
+│                                                              │
+│  ┌──────────────────┐  Unix Socket   ┌───────────────────┐   │
+│  │ <span class="kw">Init Agent</span>       │ ─────────────▶ │ <span class="kw">Sandbox</span>           │   │
+│  │ (uid: init)      │  SO_PEERCRED   │ (jarvis-sandbox)  │   │
+│  │                  │ ◀───────────── │                   │   │
+│  │ Human-gated:     │   responses    │ Mediates 9        │   │
+│  │  every side      │               │ syscalls           │   │
+│  │  effect needs    │               │                   │   │
+│  │  approval        │    L7 Proxy   │ Assigns UIDs      │   │
+│  └──────────────────┘  127.0.0.1    │ per workflow       │   │
+│                        :3128        │                   │   │
+│  ┌──────────────────┐  SO_PEERCRED  │ iptables per-UID   │   │
+│  │ <span class="kw">Telegram Daemon</span>  │◀── approval ──│ Landlock per-proc  │   │
+│  │ (jarvis-daemon)  │               └───────────────────┘   │
+│  │                  │                                        │
+│  │ Owns: config,    │  ┌─────────┐ ┌─────────┐ ┌─────────┐  │
+│  │ bot token,       │  │Workflow │ │Workflow │ │Workflow │  │
+│  │ guardrails       │  │uid:60001│ │uid:60002│ │uid:60003│  │
+│  └──────────────────┘  │ (isolated)│ (isolated)│ (isolated)│ │
+│                        └─────────┘ └─────────┘ └─────────┘  │
+└──────────────────────────────────────────────────────────────┘</div>
+
+<p>Each workflow runs as a unique Linux UID, assigned by the sandbox at fork time. UID ownership (mode 700 directories), Landlock filesystem restrictions, per-UID iptables rules, and <code>hidepid=2</code> on <code>/proc</code> prevent workflows from seeing or reaching each other. The L7 proxy identifies each workflow via <code>SO_PEERCRED</code> on the TCP socket and enforces per-UID network policy. The agent can't change its own UID because <code>setuid</code> is blocked by seccomp.</p>
+
+<!-- =============================== SYSCALLS =============================== -->
+
+<div class="divider"></div>
+<h2>The Nine Syscalls</h2>
+
+<div class="syscall-card net">
+  <h3>1. http_request</h3>
+  <div class="sig">http_request(<br>&nbsp;&nbsp;requests: [{method: str, url: str, headers: obj, body: obj}],<br>&nbsp;&nbsp;workflow_token: str<br>) &rarr; Response[] | ENETDENIED</div>
+  <p>Every outbound API call flows through this primitive. Accepts a batch of one or more requests. The sandbox validates each URL against the workflow's allowlist, scrubs outbound payloads via Presidio (tokenize-then-rehydrate for PII), and makes the actual HTTP calls from its own process. Responses are sanitized before returning to the agent's context. Streaming is handled transparently by the sandbox based on what the upstream server returns &mdash; the agent doesn't need to know or care about the protocol.</p>
+  <p>The agent's namespace has no direct network access. iptables drops all outbound from its UID except to the sandbox's Unix socket.</p>
+</div>
+
+<div class="syscall-card policy">
+  <h3>2. policy_propose</h3>
+  <div class="sig">policy_propose(config: obj) &rarr; { approved: bool } | ENOPRIV</div>
+  <p>The agent's mechanism for requesting new capabilities. It submits a complete policy configuration (see below) to the sandbox, which forwards it to the Telegram approval channel. The operator sees the full spec, approves or denies. The agent gets back a simple boolean.</p>
+  <p>Policies are immutable once approved. If the agent needs different capabilities, it proposes a new policy with a new name. This eliminates the complexity of tracking mid-flight policy mutations &mdash; old processes keep the old policy, new processes get the new one.</p>
+</div>
+
+<div class="syscall-card proc">
+  <h3>3. fork_with_policy</h3>
+  <div class="sig">fork_with_policy(<br>&nbsp;&nbsp;workflow_id: str,<br>&nbsp;&nbsp;policy_name: str,<br>&nbsp;&nbsp;inherit: bool<br>) &rarr; { pid: int, workflow_token: str, inherited_from: str | null } | EPERM</div>
+  <p>Spawns a child workflow as a new UID. The sandbox allocates a unique UID, creates a per-UID directory (mode 700), sets up POSIX ACLs on external mounts, installs per-UID iptables rules, applies Landlock and seccomp in pre_exec, and returns a new workflow token bound to the child's UID and PID.</p>
+  <p>The <code>inherit</code> flag controls token inheritance. If <code>true</code>, the child's token carries the parent's policy as well &mdash; syscalls are evaluated against the union of both policies. If <code>false</code>, the child has only its own policy. The sandbox validates the inherit flag against the parent's policy definition; the agent can't force inheritance if it wasn't approved.</p>
+  <p>Children can have capabilities that are a superset of, subset of, or entirely disjoint from the parent's. This is a deliberate departure from Linux's strict capability monotonicity. The security guarantee comes from the human approval gate &mdash; every child policy was vetted by the operator when the parent policy was approved.</p>
+</div>
+
+<div class="syscall-card net">
+  <h3>4. request_port</h3>
+  <div class="sig">request_port(workflow_token: str) &rarr; { port: int } | ENOSPC | EPERM</div>
+  <p>Allocates a port from the workflow's declared port range. The sandbox maintains a global port allocation table. First-come-first-served &mdash; if the range is exhausted, returns ENOSPC. The agent can propose a new policy with a different range if needed.</p>
+</div>
+
+<div class="syscall-card ipc">
+  <h3>5. ipc_send</h3>
+  <div class="sig">ipc_send(<br>&nbsp;&nbsp;target_workflow_id: str,<br>&nbsp;&nbsp;message: obj,<br>&nbsp;&nbsp;workflow_token: str<br>) &rarr; { ack: bool } | EPERM</div>
+  <p>Sends a one-shot message to a workflow in a different namespace. The sandbox checks that both sides' policies list each other in <code>allowed_ipc_targets</code>. The sandbox writes the message to a file in the target workflow's namespace inbox. No direct channel between namespaces ever exists.</p>
+</div>
+
+<div class="syscall-card ipc">
+  <h3>6. ipc_connect</h3>
+  <div class="sig">ipc_connect(<br>&nbsp;&nbsp;target_workflow_id: str,<br>&nbsp;&nbsp;workflow_token: str<br>) &rarr; { stream_handle: str } | EPERM</div>
+  <p>Opens a persistent bidirectional channel to another namespace. Same policy checks as <code>ipc_send</code>. The sandbox creates a proxied stream between the two namespaces &mdash; it sits in the middle and can inspect, log, or terminate the connection at any point.</p>
+</div>
+
+<div class="syscall-card info">
+  <h3>7. ps</h3>
+  <div class="sig">ps(workflow_token: str) &rarr; [{ workflow_id: str, policy_name: str }] | EPERM</div>
+  <p>Discovers active workflows. Returns only workflows whose policy name matches the caller's <code>allowed_ipc_targets</code>. A workflow can't see workflows it's not allowed to talk to. This provides the workflow IDs needed for <code>ipc_send</code>, <code>ipc_connect</code>, and <code>signal</code>.</p>
+</div>
+
+<div class="syscall-card proc">
+  <h3>8. signal</h3>
+  <div class="sig">signal(<br>&nbsp;&nbsp;target_workflow_id: str,<br>&nbsp;&nbsp;signal: str,<br>&nbsp;&nbsp;workflow_token: str<br>) &rarr; { ack: bool } | EPERM</div>
+  <p>Sends a control signal to another workflow's namespace. Supported signals: <code>term</code> (graceful shutdown), <code>kill</code> (forced termination), <code>stop</code> (pause), <code>cont</code> (resume). The sandbox validates the signal type against the caller's <code>allowed_signal_targets</code> policy, then sends the corresponding OS signal to the target namespace's root PID. The kernel handles the rest &mdash; killing the root PID of a namespace tears down everything inside it.</p>
+</div>
+
+<div class="syscall-card policy">
+  <h3>9. revoke_policy</h3>
+  <div class="sig">revoke_policy(policy_name: str, workflow_token: str) &rarr; { ack: bool, affected: int } | EPERM</div>
+  <p>Removes a policy from the approved set and propagates to all affected workflows. Hard revoke kills all processes running as affected UIDs and tears down their resources. Soft revoke recomputes the effective policy without the revoked one &mdash; in-flight requests to revoked-only endpoints start getting denied.</p>
+  <p>Revocation is strictly a reduction of capability. The agent cannot escalate by revoking. The operator can also revoke directly via the Telegram approval channel without involving the agent.</p>
+</div>
+
+<div class="callout">
+  <p><strong>Everything else is filesystem.</strong> Vault reads, working directory writes, Telegram output, bash execution, Python scripts, cron jobs &mdash; these are all either pre-opened file descriptors or SELinux-mounted resources. The sandbox provisions them at fork time, then gets out of the way. Binaries are just files on disk with execute permission.</p>
+</div>
+
+<!-- =============================== POLICY =============================== -->
+
+<div class="divider"></div>
+<h2>Anatomy of a Policy</h2>
+
+<p>When the agent calls <code>policy_propose</code>, it submits a configuration object. The sandbox validates the structure, logs it, and forwards it to the Telegram approval channel.</p>
+
+<pre><code><span class="kw">policy_name</span>: <span class="str">"research_scraper_v1"</span>
+
+<span class="kw">rationale</span>: <span class="str">"Web scraper for prediction market research"</span>
+
+<span class="kw">http_allowlist</span>:
+  - <span class="str">"*.anthropic.com"</span>
+  - <span class="str">"api.polymarket.com"</span>
+  - <span class="str">"api.kalshi.com"</span>
+
+<span class="kw">external_mounts</span>:
+  - <span class="kw">path</span>: <span class="str">"/Volumes/Syncthing/vault/notes/research"</span>
+    <span class="kw">mode</span>: <span class="str">"r"</span>
+  - <span class="kw">path</span>: <span class="str">"/Volumes/Syncthing/vault/notes/scratch"</span>
+    <span class="kw">mode</span>: <span class="str">"rwx"</span>
+  - <span class="kw">path</span>: <span class="str">"/usr/bin/python3"</span>
+    <span class="kw">mode</span>: <span class="str">"rx"</span>
+
+<span class="kw">allowed_child_policies</span>:
+  - <span class="kw">policy_name</span>: <span class="str">"data_analyzer_v1"</span>
+    <span class="kw">inherit</span>: <span class="type">false</span>
+  - <span class="kw">policy_name</span>: <span class="str">"*_helper"</span>
+    <span class="kw">inherit</span>: <span class="type">true</span>
+
+<span class="kw">bind_ports</span>: <span class="type">[8080, 8089]</span>
+
+<span class="kw">allowed_ipc_targets</span>:
+  - <span class="str">"data_analyzer_*"</span>
+
+<span class="kw">allowed_signal_targets</span>:
+  - <span class="kw">policy_name</span>: <span class="str">"*_helper"</span>
+    <span class="kw">signals</span>: [<span class="str">"term"</span>, <span class="str">"kill"</span>]
+  - <span class="kw">policy_name</span>: <span class="str">"data_analyzer_*"</span>
+    <span class="kw">signals</span>: [<span class="str">"term"</span>, <span class="str">"stop"</span>, <span class="str">"cont"</span>]</code></pre>
+
+<h3>policy_name</h3>
+<p>A unique, immutable identifier. Once <code>research_scraper_v1</code> exists, it can never be modified. If the agent needs different capabilities, it proposes <code>research_scraper_v2</code>. The sandbox rejects any proposal that reuses an existing name.</p>
+
+<h3>rationale</h3>
+<p>Free-text explanation shown in the Telegram approval channel. The agent has total freedom here &mdash; which means the operator should always evaluate the <em>capabilities</em> being requested, not just the stated rationale. The agent can lie about why it needs something; it can't lie about what it's asking for.</p>
+
+<h3>http_allowlist</h3>
+<p>Endpoints this policy can reach via <code>http_request</code>. Wildcards are supported (<code>*.anthropic.com</code>). The sandbox resolves these and rejects any request to an unlisted endpoint.</p>
+
+<h3>external_mounts</h3>
+<p>Filesystem paths outside the sandbox, with access modes: <code>r</code> (read), <code>rw</code> (read-write), <code>rx</code> (read-execute), <code>rwx</code> (full). Provisioned via SELinux at fork time. Once the namespace is running, the workflow accesses these at native filesystem performance &mdash; no sandbox mediation on each operation. Paths are canonicalized to prevent traversal attacks.</p>
+
+<h3>allowed_child_policies</h3>
+<p>Named policies (wildcards ok) that this policy can spawn via <code>fork_with_policy</code>, each with an <code>inherit</code> flag. If <code>inherit: true</code>, the child's workflow token carries the parent's policy as well (union of both). If <code>inherit: false</code>, the child is independently scoped. The inherit flag is defined per-child-policy in the parent's spec and validated by the sandbox at fork time &mdash; the agent can't override it.</p>
+
+<h3>bind_ports</h3>
+<p>Port range for <code>request_port</code>. The sandbox allocates from this range, first-come-first-served across all policies. If the range is exhausted, the agent gets ENOSPC.</p>
+
+<h3>allowed_ipc_targets</h3>
+<p>Policy names (wildcards ok) that this policy can communicate with via <code>ipc_send</code> and <code>ipc_connect</code>. Both sides must list each other &mdash; mutual consent. Also controls what <code>ps</code> returns: a workflow can only see workflows matching its IPC targets.</p>
+
+<h3>allowed_signal_targets</h3>
+<p>Policy names (wildcards ok) that this policy can send signals to, along with which signal types are allowed. You might allow <code>term</code> and <code>stop</code>/<code>cont</code> for most targets but restrict <code>kill</code> to helper processes.</p>
+
+<div class="callout">
+  <p><strong>What the agent can't see.</strong> The policy above is what the agent <em>proposes</em>. The sandbox stores additional metadata the agent never sees: the internal UID assigned to the policy, the approval timestamp, the operator's notes, and the signing key used to generate workflow tokens. The agent knows what it asked for. It doesn't know how the sandbox enforces it.</p>
+</div>
+
+<!-- =============================== TOKEN =============================== -->
+
+<div class="divider"></div>
+<h2>Workflow Tokens and Inheritance</h2>
+
+<p>Every syscall includes a <code>workflow_token</code>. This is the agent's identity &mdash; the equivalent of a UID in the kernel. The sandbox assigns it at fork time, binds it to the process's PID via <code>SO_PEERCRED</code>, and uses it to look up the policy on every call.</p>
+
+<p>The sandbox maintains a simple lookup table:</p>
+
+<pre><code><span class="kw">workflow_token</span> &rarr; {
+  <span class="kw">own_policy</span>: <span class="str">"research_scraper_v1"</span>,
+  <span class="kw">inherited_from</span>: <span class="str">"parent_token_xyz"</span> | <span class="type">null</span>
+}</code></pre>
+
+<p>When <code>inherited_from</code> is set, the sandbox evaluates syscalls against both the child's own policy and the parent's. If either allows the operation, it proceeds. The audit log tracks which policy was used &mdash; "child used inherited privilege from parent to make this HTTP request" vs "child used its own policy."</p>
+
+<p>This means a child with <code>inherit: true</code> effectively holds two tokens &mdash; its own identity plus its parent's. The sandbox manages this internally; the child just presents its single token and the sandbox handles the policy union.</p>
+
+<!-- =============================== INIT =============================== -->
+
+<div class="divider"></div>
+<h2>Init: The Root Process</h2>
+
+<p>Init is the first process spawned by the sandbox at system startup. It's the agent's coordinator &mdash; it reasons, plans, and dispatches work. But it has a unique behavioral constraint: <strong>every side effect requires human approval via Telegram.</strong></p>
+
+<p>This mirrors Claude Code's permission model: the agent reasons freely but can't execute without a human gate. Init proposes "I think I should spawn a research workflow with <code>research_scraper_v1</code>." The operator approves. Init calls <code>fork_with_policy</code>. The tool call is deterministic &mdash; no agentic interpretation between approval and execution.</p>
+
+<h3>Init's Identity</h3>
+<p>Init runs as <code>jarvis-agent</code> UID with a root workflow token assigned by the sandbox. It has a broad SELinux context granting access to common binaries and its working directory.</p>
+
+<h3>Pre-opened Resources</h3>
+<p>Telegram output channel (read/write FD) for communicating with the operator. Telegram input channel (read FD) for receiving operator commands. Working directory (read/write) for persistent session state. Namespace outbox directories (read) for reading output from child workflows. A router daemon (running as <code>jarvis-daemon</code>) relays workflow messages to and from separate Telegram threads.</p>
+
+<h3>Syscall Access (All Human-Gated)</h3>
+<p>Init has access to all eight syscalls: <code>http_request</code>, <code>policy_propose</code>, <code>fork_with_policy</code>, <code>request_port</code>, <code>ipc_send</code>, <code>ipc_connect</code>, <code>ps</code>, and <code>signal</code>. Every invocation requires operator approval before execution.</p>
+
+<h3>Available Binaries (Via SELinux Mounts)</h3>
+<p>Shell (<code>bash</code>, <code>sh</code>, <code>zsh</code>), languages (<code>python3</code>, <code>node</code>), package managers (<code>pip</code>, <code>npm</code>), version control (<code>git</code>), remote access (<code>ssh</code>, <code>scp</code>), and common Unix utilities (<code>grep</code>, <code>sed</code>, <code>awk</code>, <code>curl</code>, <code>wget</code>, <code>jq</code>, <code>cat</code>, <code>ls</code>, <code>find</code>, <code>tar</code>, <code>gzip</code>). All human-gated.</p>
+
+<h3>Init's Policy Wildcards</h3>
+<pre><code><span class="kw">allowed_child_policies</span>: [{ <span class="kw">policy_name</span>: <span class="str">"*"</span>, <span class="kw">inherit</span>: <span class="type">true</span> }]
+<span class="kw">allowed_ipc_targets</span>: [<span class="str">"*"</span>]
+<span class="kw">allowed_signal_targets</span>: [{ <span class="kw">policy_name</span>: <span class="str">"*"</span>, <span class="kw">signals</span>: [<span class="str">"term"</span>, <span class="str">"kill"</span>, <span class="str">"stop"</span>, <span class="str">"cont"</span>] }]</code></pre>
+<p>Init can see everything, talk to everything, and signal everything &mdash; but can't do any of it without operator approval. The wildcard is safe because the human gate is the enforcement, not the policy scope.</p>
+
+<div class="callout-blue">
+  <p><strong>Why init has broad binary access.</strong> If the operator decides to approve "run this python script" on init for something quick, that's a deliberate human choice &mdash; the same as running something as root on your own machine. The architecture didn't fail; you just chose convenience over process separation. The policy model exists for autonomous workflows where the agent acts without you. Init never acts without you.</p>
+</div>
+
+<!-- =============================== WORKFLOWS =============================== -->
+
+<div class="divider"></div>
+<h2>Five Workflows That Challenge the Design</h2>
+
+<p>A minimal API is only useful if it holds up under real workloads. We tested the eight-syscall design against adversarial workflows.</p>
+
+<div class="workflow">
+  <div class="workflow-num">Workflow 1</div>
+  <h3>Multi-Stage Research with Heterogeneous Children</h3>
+  <p class="challenge">Challenge: The agent spawns children with different HTTP allowlists. Can children have capabilities the parent doesn't?</p>
+  <p class="resolution">Yes. The parent's <code>allowed_child_policies</code> lists each child policy by name. Each child has its own independently scoped capability set, approved upfront by the operator. The parent doesn't need the union of all child capabilities &mdash; it just needs permission to spawn those policy types. Privilege escalation isn't a concern because the agent can't invent new policies at runtime.</p>
+</div>
+
+<div class="workflow">
+  <div class="workflow-num">Workflow 2</div>
+  <h3>Data Pipeline with Heavy I/O</h3>
+  <p class="challenge">Challenge: Hundreds of file reads/writes to external mounts. Per-operation overhead would be prohibitive.</p>
+  <p class="resolution">External mounts are provisioned via SELinux at fork time. Once the namespace is running, the workflow accesses files at native filesystem performance &mdash; no sandbox mediation on each operation. This eliminated an entire syscall (<code>access_external_mount</code>) from the design. For file descriptor leakage concerns: processes in separate namespaces can't share FDs because they can't see each other. Within a namespace, FD sharing is just normal IPC.</p>
+</div>
+
+<div class="workflow">
+  <div class="workflow-num">Workflow 3</div>
+  <h3>Mid-Flight Policy Mutation</h3>
+  <p class="challenge">Challenge: The agent hits a rate limit and proposes a higher cap. Children are running with the old policy.</p>
+  <p class="resolution">Policies are immutable. The agent proposes <code>web_scraper_v2</code> with the new limits. Old children keep running on <code>v1</code>. New children get <code>v2</code>. Each version has its own UID. The Telegram approval channel shows a diff so the operator can see exactly what changed. No mid-flight mutation, no tracking which policies are in active use.</p>
+</div>
+
+<div class="workflow">
+  <div class="workflow-num">Workflow 4</div>
+  <h3>Recursive Forking (Deep Process Trees)</h3>
+  <p class="challenge">Challenge: Parent spawns child, child spawns grandchild, grandchild spawns great-grandchild. Do tokens propagate correctly?</p>
+  <p class="resolution">Each generation calls <code>fork_with_policy</code> independently. The sandbox assigns each a new PID-bound workflow token. With <code>inherit: true</code>, each generation carries its parent's policy as well. The tree is arbitrarily deep but every branch was pre-approved. No special multi-level lineage tracking needed.</p>
+</div>
+
+<div class="workflow">
+  <div class="workflow-num">Workflow 5</div>
+  <h3>Asynchronous Webhook Handling</h3>
+  <p class="challenge">Challenge: Agent makes an HTTP request to a service that calls back asynchronously. No listener exists.</p>
+  <p class="resolution">The agent spawns a listener child via <code>fork_with_policy</code> with a policy that includes <code>bind_ports</code> and the appropriate <code>can_bind_port</code> capability. The child calls <code>request_port</code>, binds to the allocated port, and waits for callbacks. Just another process in the workflow tree &mdash; no special mechanics needed.</p>
+</div>
+
+<!-- =============================== COMMUNICATION =============================== -->
+
+<div class="divider"></div>
+<h2>Communication Model</h2>
+
+<h3>Init to Operator</h3>
+<p>Pre-opened Telegram channel. Init writes freely (though still human-gated for side effects). Operator reads and responds in the same channel.</p>
+
+<h3>Operator to Workflows</h3>
+<p>Each workflow gets its own Telegram thread or command prefix. A non-agentic router daemon (running as <code>jarvis-daemon</code>) watches filesystem directories and relays messages. The daemon is a dumb pipe: read file, send to Telegram, delete file. No parsing, no LLM involvement.</p>
+
+<h3>Workflow to Operator</h3>
+<p>Workflow writes to its outbox directory. Router daemon relays to the appropriate Telegram thread. Communication is always human-initiated for commands; workflows can send status updates and results unprompted.</p>
+
+<h3>Cross-Workflow</h3>
+<p>Workflows in separate namespaces use <code>ipc_send</code> and <code>ipc_connect</code>, mediated by the sandbox. Both policies must list each other in <code>allowed_ipc_targets</code>. Workflows discover each other via <code>ps</code>, which only returns workflows they're allowed to see. No direct channels ever exist between namespaces.</p>
+
+<h3>Within a Workflow</h3>
+<p>Processes in the same namespace communicate freely &mdash; Unix sockets, pipes, shared memory, temp files. The sandbox doesn't mediate internal IPC. It only cares when something crosses a namespace boundary.</p>
+
+<h3>Cron and Scheduling</h3>
+<p>Cron is just a binary on disk with execute permission. If a workflow's SELinux mount includes <code>cron</code> with <code>rx</code> access, it can schedule jobs. Init scheduling cron jobs requires operator approval (like everything init does). Autonomous workflows can schedule freely within their policy bounds.</p>
+
+<!-- =============================== BREAKS =============================== -->
+
+<div class="divider"></div>
+<h2>Where the OS Analogy Breaks</h2>
+
+<h3>Children can be more privileged than parents</h3>
+<p>In Linux, capability monotonicity is a hard rule. In this system, a "research coordinator" with no HTTP access can spawn a "web scraper" child that does. This works because the security guarantee comes from a different place &mdash; the operator approved the entire policy tree upfront. The approval gate replaces the monotonicity constraint.</p>
+
+<h3>File access is provisioned, not mediated</h3>
+<p>In early iterations of this design, we had an <code>access_external_mount</code> syscall where the agent passed file operations to the sandbox. This was consistent but slow. We replaced it with POSIX ACLs and Landlock provisioned at fork time &mdash; the sandbox sets up the filesystem once, then the workflow operates at native speed. Each workflow runs as a unique UID with its own directories (mode 700) and ACL-granted access to external paths.</p>
+
+<h3>Isolation via UIDs, not namespaces</h3>
+<p>Early iterations used per-workflow Linux namespaces (<code>clone(CLONE_NEWPID | CLONE_NEWNET | CLONE_NEWNS)</code>) for isolation. This provided strong guarantees but introduced complex networking: each namespace needed its own veth pair, unique IP, separate iptables rules, and DNAT for inbound traffic. We replaced it with per-workflow UID separation: each workflow runs as a unique Linux UID, with per-UID iptables rules, Landlock filesystem restrictions, and <code>hidepid=2</code> on <code>/proc</code>. The L7 proxy identifies workflows via <code>SO_PEERCRED</code> on the TCP socket. Lighter, simpler networking, same practical isolation.</p>
+
+<h3>IPC targeting uses policy names, not process IDs</h3>
+<p>In Linux, you signal or message specific PIDs. In this system, workflows can't see each other's PIDs (<code>hidepid=2</code> hides other UIDs' processes). Instead, they target workflow IDs discovered via <code>ps</code>, which only returns workflows matching the caller's <code>allowed_ipc_targets</code>. This emerged from a simple constraint: a workflow doesn't know what other workflows exist at proposal time, so it can't declare specific IDs as IPC targets.</p>
+
+<!-- =============================== CONCLUSION =============================== -->
+
+<div class="divider"></div>
+<h2>The Complete Picture</h2>
+
+<p>Nine syscalls. A Telegram channel. A working directory. Per-UID isolation with Landlock and iptables. That's the entire interface between an AI agent and the outside world.</p>
+
+<p>We started trying to build four syscalls and ended up with nine. Every addition came from a real constraint &mdash; port allocation needed its own primitive because port collisions are a real problem. IPC needed two primitives (message and stream) because Linux has both for good reasons. Process discovery needed <code>ps</code> because workflows can't see each other. Signals needed their own syscall because "kill a workflow" has different semantics than "send it a message." Policy revocation needed its own syscall because the operator needs to dynamically narrow capabilities.</p>
+
+<p>The design principle throughout: <em>the entity being controlled must never be the entity evaluating the control.</em> The agent reasons and requests. The sandbox evaluates and mediates. The operator approves and configures. Three roles, three UIDs, three distinct privilege levels that can't be collapsed.</p>
+
+<p>We understand now why the Linux kernel has so many syscalls. Each one exists because someone hit a case where the existing ones weren't enough. Nine is a lot less than three hundred, but the pressures are the same.</p>
+
+<div class="post-footer">
+  <p>This architecture is designed for the Jarvis project &mdash; a privacy-first, always-on AI assistant running on a Mac Mini (M4). The sandbox layer wraps OpenClaw, with per-UID isolation enforced by Landlock, iptables, and seccomp. The L7 proxy identifies workflows via SO_PEERCRED and enforces per-UID network policy via OPA. Policy approval flows through a dedicated Telegram channel. The design is informed by Linux kernel isolation primitives, adapted for the unique constraints of agentic AI systems.</p>
+</div>
+
+</div>
+</body>
+</html>
