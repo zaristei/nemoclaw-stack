@@ -51,23 +51,25 @@ COMMAND="${1:-help}"
 shift || true
 
 CLEAN=0
-while [[ $# -gt 0 ]]; do
-    case "$1" in
-        --secrets)
-            export SECRETS_BACKEND="${2:?--secrets requires a value (env, keychain)}"
-            shift 2
-            ;;
-        --clean)
-            CLEAN=1
-            shift
-            ;;
-        *)
-            echo "Unknown option: $1" >&2
-            COMMAND=help
-            break
-            ;;
-    esac
-done
+if [[ "$COMMAND" != "run" ]]; then
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --secrets)
+                export SECRETS_BACKEND="${2:?--secrets requires a value (env, keychain)}"
+                shift 2
+                ;;
+            --clean)
+                CLEAN=1
+                shift
+                ;;
+            *)
+                echo "Unknown option: $1" >&2
+                COMMAND=help
+                break
+                ;;
+        esac
+    done
+fi
 
 # ═════════════════════════════════════════════════════════════════════════════
 # COMMANDS
@@ -78,10 +80,13 @@ cmd_help() {
 Usage: ./stack.sh <command> [options]
 
 Commands:
-  start [--secrets keychain]   Build, start services, and onboard NemoClaw
+  start [--secrets keychain]   Build and start infrastructure services
+  create                       Create sandbox and onboard NemoClaw
   stop  [--clean]              Graceful teardown (--clean wipes state dirs)
   ps                           Show component status
   health                       Test LiteLLM and provider connectivity
+  env                          Print shell exports (use: eval \$(./stack.sh env))
+  run <cmd...>                 Run a command with stack env loaded
 
 Options:
   --secrets <backend>          Secrets backend: env (default), keychain
@@ -288,6 +293,13 @@ cmd_start() {
         IMAGE_TAG=local mise exec -- ./tasks/scripts/docker-build-image.sh cluster
     )
 
+    log "Infrastructure ready. Run './stack.sh create' to create a sandbox."
+}
+
+# ── CREATE ──────────────────────────────────────────────────────────────────
+cmd_create() {
+    export PATH="${CARGO_TARGET_DIR}/release:${PATH}"
+
     # ── NemoClaw: install dependencies ──────────────────────────────────────
     local lock="${NEMOCLAW_DIR}/node_modules/.package-lock.json"
     if [[ ! -f "$lock" ]] || [[ "${NEMOCLAW_DIR}/package.json" -nt "$lock" ]]; then
@@ -299,6 +311,7 @@ cmd_start() {
     source "${SCRIPT_DIR}/scripts/resolve-secrets.sh"
 
     export NEMOCLAW_SKIP_VALIDATE=1
+    export NEMOCLAW_ACCEPT_THIRD_PARTY_SOFTWARE=1
     export NEMOCLAW_PROVIDER=custom
     export NEMOCLAW_ENDPOINT_URL="${NEMOCLAW_ENDPOINT:-http://host.docker.internal:4000/v1}"
     export NEMOCLAW_MODEL="${NEMOCLAW_MODEL:-tier-haiku-sensitive}"
@@ -308,7 +321,9 @@ cmd_start() {
     export COMPATIBLE_API_KEY="${LITELLM_MASTER_KEY}"
 
     run_onboard() {
-        node "${NEMOCLAW_DIR}/bin/nemoclaw.js" onboard --non-interactive
+        node "${NEMOCLAW_DIR}/bin/nemoclaw.js" onboard \
+            --non-interactive \
+            --yes-i-accept-third-party-software
     }
 
     local existing_sandbox
@@ -323,7 +338,7 @@ cmd_start() {
         fi
     fi
 
-    log "Stack ready."
+    log "Sandbox ready."
 }
 
 # ── STOP ─────────────────────────────────────────────────────────────────────
@@ -404,6 +419,20 @@ cmd_stop() {
     log "Done."
 }
 
+cmd_run() {
+    export PATH="${CARGO_TARGET_DIR}/release:${PATH}"
+    exec "$@"
+}
+
+cmd_env() {
+    cat <<EOF
+export COLIMA_HOME="${COLIMA_HOME}"
+export DOCKER_HOST="${DOCKER_HOST}"
+export XDG_CONFIG_HOME="${XDG_CONFIG_HOME}"
+export NEMOCLAW_HOME="${NEMOCLAW_HOME}"
+EOF
+}
+
 # ── Helpers ──────────────────────────────────────────────────────────────────
 _stop_pid_file() {
     local pidfile="$1" label="$2"
@@ -426,9 +455,12 @@ _stop_pid_file() {
 # ── Dispatch ─────────────────────────────────────────────────────────────────
 case "$COMMAND" in
     start)  cmd_start ;;
+    create) cmd_create ;;
     stop)   cmd_stop ;;
     ps)     cmd_ps ;;
     health) cmd_health ;;
+    env)    cmd_env ;;
+    run)    cmd_run "$@" ;;
     help|--help|-h) cmd_help ;;
     *)
         echo "Unknown command: $COMMAND" >&2

@@ -30,8 +30,8 @@ log = logging.getLogger("approval-bridge")
 # Configuration (from environment)
 # ---------------------------------------------------------------------------
 
-TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "")
-TELEGRAM_CHAT_ID = int(os.environ.get("TELEGRAM_CHAT_ID", "0"))
+TELEGRAM_BOT_TOKEN = os.environ.get("APPROVAL_BOT_TOKEN", "") or os.environ.get("TELEGRAM_BOT_TOKEN", "")
+TELEGRAM_CHAT_ID = int(os.environ.get("APPROVAL_CHAT_ID", "0") or os.environ.get("TELEGRAM_CHAT_ID", "0"))
 WEBHOOK_SECRET = os.environ.get("WEBHOOK_SECRET", "")
 LISTEN_HOST = os.environ.get("LISTEN_HOST", "0.0.0.0")
 LISTEN_PORT = int(os.environ.get("LISTEN_PORT", "8090"))
@@ -230,7 +230,10 @@ async def handle_button(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     query = update.callback_query
     if query is None:
         return
-    await query.answer()
+    try:
+        await query.answer()
+    except Exception:
+        log.warning("Failed to answer callback query (expired or invalid)")
 
     data = query.data or ""
     if ":" not in data:
@@ -351,6 +354,7 @@ async def run() -> None:
 
     # Start both.
     async with telegram_app:
+        await telegram_app.updater.start_polling(allowed_updates=["callback_query"])
         await telegram_app.start()
         await site.start()
         log.info("Approval bridge listening on %s:%d", LISTEN_HOST, LISTEN_PORT)
@@ -363,6 +367,7 @@ async def run() -> None:
         await stop.wait()
 
         log.info("Shutting down...")
+        await telegram_app.updater.stop()
         await telegram_app.stop()
         await runner.cleanup()
 
