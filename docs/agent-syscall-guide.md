@@ -157,7 +157,38 @@ Both your policy and the target's policy must list each other in `allowed_ipc_ta
 
 **ipc_connect** — Open a bidirectional stream to another workflow.
 
-Same mutual consent rules as `ipc_send`. The stream persists until either side closes it.
+Same mutual consent rules as `ipc_send`. The stream persists until either side closes it. If your IPC target entry has scrub configs, they are applied to the stream. The response tells you which scrubbers are active:
+
+```json
+{"method": "ipc_connect", "params": {"target_workflow_id": "wf_processor_001"}}
+→ {"stream_id": "uuid", "socket_path": "/tmp/.../caller.sock",
+   "scrubbing": {"egress": "field_pii", "ingress": "instruction_strip"}}
+```
+
+### Specifying Scrubbers in IPC Policy
+
+When declaring `allowed_ipc_targets`, each target can be either a simple string (no scrubbing) or a configured entry with per-direction scrubbers:
+
+```yaml
+allowed_ipc_targets:
+  # Simple — no scrubbing
+  - "logger_*"
+
+  # Configured — per-direction scrubbers
+  - policy_name: "processor_*"
+    scrub_egress:                    # applied to data YOU SEND
+      scrubber: field_pii
+      data_types: [pii]
+      de_taints: true
+      config:
+        fields: ["$.user.email", "$.records[*].ssn"]
+        action: redact
+    scrub_ingress:                   # applied to data YOU RECEIVE
+      scrubber: instruction_strip
+      data_types: [web_content]
+```
+
+Both `ipc_send` and `ipc_connect` use the same scrub config from your policy. The scrubbers fire automatically — you don't need to do anything at call time.
 
 ### Policy
 
