@@ -101,14 +101,14 @@ while IFS='|' read -r model tier api_key_ref; do
         fi
 
     elif [[ "$model" == openai/* ]]; then
-        # OpenAI direct
+        # OpenAI direct (uses max_completion_tokens for newer models)
         api_key="${OPENAI_API_KEY:-}"
         [[ -z "$api_key" ]] && { echo "  ? ${model} — OPENAI_API_KEY not set"; continue; }
         real_model="${model#openai/}"
         resp=$(curl -sk --max-time 30 "https://api.openai.com/v1/chat/completions" \
             -H "Authorization: Bearer ${api_key}" \
             -H "Content-Type: application/json" \
-            -d "{\"model\":\"${real_model}\",\"messages\":[{\"role\":\"user\",\"content\":\"respond with only the word pong\"}],\"max_tokens\":5}" 2>&1)
+            -d "{\"model\":\"${real_model}\",\"messages\":[{\"role\":\"user\",\"content\":\"respond with only the word pong\"}],\"max_completion_tokens\":32}" 2>&1)
 
     elif [[ "$model" == gemini/* ]]; then
         # Google via LiteLLM format — test with Google's API
@@ -117,9 +117,20 @@ while IFS='|' read -r model tier api_key_ref; do
         real_model="${model#gemini/}"
         resp=$(curl -sk --max-time 30 "https://generativelanguage.googleapis.com/v1beta/models/${real_model}:generateContent?key=${api_key}" \
             -H "Content-Type: application/json" \
-            -d "{\"contents\":[{\"parts\":[{\"text\":\"respond with only the word pong\"}]}],\"generationConfig\":{\"maxOutputTokens\":5}}" 2>&1)
-        # Google has different response format
-        content=$(echo "$resp" | python3 -c "import sys,json; r=json.load(sys.stdin); print(r['candidates'][0]['content']['parts'][0]['text'])" 2>/dev/null || true)
+            -d "{\"contents\":[{\"parts\":[{\"text\":\"respond with only the word pong\"}]}],\"generationConfig\":{\"maxOutputTokens\":64}}" 2>&1)
+        # Google response format. Thinking models may return empty content on truncation.
+        content=$(echo "$resp" | python3 -c "
+import sys,json
+r=json.load(sys.stdin)
+c=r.get('candidates',[{}])[0]
+parts=c.get('content',{}).get('parts',[])
+if parts and parts[0].get('text'):
+    print(parts[0]['text'])
+elif c.get('finishReason') in ('MAX_TOKENS','STOP'):
+    print('(ok, truncated)')
+elif 'modelVersion' in r:
+    print('(model exists)')
+" 2>/dev/null || true)
         error=$(echo "$resp" | python3 -c "import sys,json; e=json.load(sys.stdin).get('error',{}); print(e.get('message','')[:120] if e else '')" 2>/dev/null || true)
         if [[ -n "$content" ]]; then
             echo "  ✓ ${model} (tier: ${tier})"
@@ -139,7 +150,7 @@ while IFS='|' read -r model tier api_key_ref; do
         resp=$(curl -sk --max-time 30 "https://api.x.ai/v1/chat/completions" \
             -H "Authorization: Bearer ${api_key}" \
             -H "Content-Type: application/json" \
-            -d "{\"model\":\"${real_model}\",\"messages\":[{\"role\":\"user\",\"content\":\"respond with only the word pong\"}],\"max_tokens\":5}" 2>&1)
+            -d "{\"model\":\"${real_model}\",\"messages\":[{\"role\":\"user\",\"content\":\"respond with only the word pong\"}],\"max_tokens\":32}" 2>&1)
 
     elif [[ "$model" == mistral/* ]]; then
         api_key="${MISTRAL_API_KEY:-}"
@@ -148,7 +159,7 @@ while IFS='|' read -r model tier api_key_ref; do
         resp=$(curl -sk --max-time 30 "https://api.mistral.ai/v1/chat/completions" \
             -H "Authorization: Bearer ${api_key}" \
             -H "Content-Type: application/json" \
-            -d "{\"model\":\"${real_model}\",\"messages\":[{\"role\":\"user\",\"content\":\"respond with only the word pong\"}],\"max_tokens\":5}" 2>&1)
+            -d "{\"model\":\"${real_model}\",\"messages\":[{\"role\":\"user\",\"content\":\"respond with only the word pong\"}],\"max_tokens\":32}" 2>&1)
 
     elif [[ "$model" == claude-* ]]; then
         # Anthropic (direct, uses Messages API)
@@ -158,7 +169,7 @@ while IFS='|' read -r model tier api_key_ref; do
             -H "x-api-key: ${api_key}" \
             -H "anthropic-version: 2023-06-01" \
             -H "Content-Type: application/json" \
-            -d "{\"model\":\"${model}\",\"max_tokens\":5,\"messages\":[{\"role\":\"user\",\"content\":\"respond with only the word pong\"}]}" 2>&1)
+            -d "{\"model\":\"${model}\",\"max_tokens\":32,\"messages\":[{\"role\":\"user\",\"content\":\"respond with only the word pong\"}]}" 2>&1)
         # Anthropic response format
         content=$(echo "$resp" | python3 -c "import sys,json; r=json.load(sys.stdin); print(r['content'][0]['text'])" 2>/dev/null || true)
         error=$(echo "$resp" | python3 -c "import sys,json; e=json.load(sys.stdin).get('error',{}); print(e.get('message','')[:120] if e else '')" 2>/dev/null || true)
