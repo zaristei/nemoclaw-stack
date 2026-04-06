@@ -485,12 +485,13 @@ cmd_start() {
     )
     export PATH="${CARGO_TARGET_DIR}/release:${PATH}"
 
-    # ── OpenShell: build mediator + CLI ────────────────────────────────────
-    log "Building OpenShell mediator + mediator-cli (incremental)..."
+    # ── OpenShell: build mediator + CLI + daemon ──────────────────────────
+    log "Building OpenShell mediator + mediator-cli + mediator-daemon (incremental)..."
     (
         cd "${OPENSHELL_DIR}"
         mise exec -- cargo build --release -p openshell-sandbox
         mise exec -- cargo build --release -p openshell-sandbox --bin mediator-cli
+        mise exec -- cargo build --release -p openshell-sandbox --bin mediator-daemon
     )
 
     # ── Mediator env (embedded in sandbox process) ──────────────────────────
@@ -557,17 +558,19 @@ cmd_create() {
         fi
     fi
 
-    # ── Upload mediator-cli into sandbox ──────────────────────────────────
+    # ── Upload mediator binaries into sandbox ─────────────────────────────
     local sandbox_name="${NEMOCLAW_SANDBOX_NAME:-my-assistant}"
-    local mediator_cli_bin="${CARGO_TARGET_DIR}/release/mediator-cli"
-    if [[ -f "$mediator_cli_bin" ]]; then
-        log "Uploading mediator-cli to sandbox..."
-        openshell sandbox upload "$sandbox_name" "$mediator_cli_bin" "/sandbox/mediator-cli" \
-        && log "mediator-cli uploaded to /sandbox/mediator-cli" \
-        || log "Warning: mediator-cli upload failed"
-    else
-        log "Warning: mediator-cli not found at $mediator_cli_bin — skipping upload"
-    fi
+    for bin_name in mediator-cli mediator-daemon; do
+        local bin_path="${CARGO_TARGET_DIR}/release/${bin_name}"
+        if [[ -f "$bin_path" ]]; then
+            log "Uploading ${bin_name} to sandbox..."
+            openshell sandbox upload "$sandbox_name" "$bin_path" "/sandbox/${bin_name}" \
+            && log "${bin_name} uploaded to /sandbox/${bin_name}" \
+            || log "Warning: ${bin_name} upload failed"
+        else
+            log "Warning: ${bin_name} not found at $bin_path — skipping"
+        fi
+    done
 
     # ── Upload agent syscall guide ─────────────────────────────────────────
     local guide="${SCRIPT_DIR}/docs/agent-syscall-guide.md"
