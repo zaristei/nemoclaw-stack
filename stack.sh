@@ -179,9 +179,9 @@ cmd_health() {
     fi
 
     echo ""
-    echo "=== Provider keys ==="
+    echo "=== Direct provider keys ==="
 
-    local -a models=(
+    local -a direct_models=(
         "Anthropic:claude-haiku-4-5-20251001"
         "OpenAI:openai/gpt-5.4-nano"
         "Google:gemini/gemini-3.1-flash-lite-preview"
@@ -189,6 +189,8 @@ cmd_health() {
         "Mistral:mistral/mistral-small-2603"
         "OpenRouter:openrouter/deepseek/deepseek-v3.2"
     )
+
+    local -a models=("${direct_models[@]}")
 
     local all_ok=true
     for entry in "${models[@]}"; do
@@ -208,6 +210,40 @@ cmd_health() {
             echo "  ✓ ${label}: ok"
         else
             echo "  ✗ ${label}: ${error:-no response / timeout}"
+            all_ok=false
+        fi
+    done
+
+    echo ""
+    echo "=== Model tier routing ==="
+    echo "  (tests the full LiteLLM routing chain including fallbacks)"
+
+    local -a tiers=(
+        "tier-opus-sensitive"
+        "tier-sonnet-sensitive"
+        "tier-haiku-sensitive"
+        "tier-opus-nonsensitive"
+        "tier-sonnet-nonsensitive"
+        "tier-haiku-nonsensitive"
+    )
+
+    for tier in "${tiers[@]}"; do
+        local resp content error
+        resp=$(curl -sk --max-time 30 "${base}/v1/chat/completions" \
+            -H "Authorization: Bearer ${key}" \
+            -H "Content-Type: application/json" \
+            -d "{\"model\":\"${tier}\",\"messages\":[{\"role\":\"user\",\"content\":\"respond with only the word pong\"}],\"max_tokens\":5}" 2>&1)
+
+        content=$(echo "$resp" | python3 -c "import sys,json; r=json.load(sys.stdin); print(r['choices'][0]['message']['content'])" 2>/dev/null || true)
+        error=$(echo "$resp" | python3 -c "import sys,json; r=json.load(sys.stdin); e=r.get('error',{}); print(e.get('message','')[:100] if e else '')" 2>/dev/null || true)
+        # Extract which model actually served the request
+        local served_model
+        served_model=$(echo "$resp" | python3 -c "import sys,json; print(json.load(sys.stdin).get('model','?'))" 2>/dev/null || echo "?")
+
+        if [[ -n "$content" ]]; then
+            echo "  ✓ ${tier}: ok (served by ${served_model})"
+        else
+            echo "  ✗ ${tier}: ${error:-no response / timeout}"
             all_ok=false
         fi
     done
