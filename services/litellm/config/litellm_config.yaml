@@ -21,11 +21,25 @@
 # ROUTER SETTINGS
 # ============================================================
 router_settings:
-  routing_strategy: simple-shuffle
-  num_retries: 3
-  retry_after: 2
-  cooldown_time: 300
+  # latency-based-routing tries fastest provider first, falls through on failure.
+  # This avoids simple-shuffle randomly hitting a slow/down provider.
+  routing_strategy: latency-based-routing
 
+  # Retry across ALL deployments in the group before giving up.
+  # With 5-6 providers per tier, this ensures every provider gets tried.
+  num_retries: 6
+  retry_after: 1
+
+  # Short cooldown — transient errors shouldn't blacklist a provider for 5 minutes.
+  # 30s is enough to skip a momentary rate limit without losing a provider long-term.
+  cooldown_time: 30
+
+  # A provider needs 2 failures in the cooldown window before being cooled down.
+  # Prevents a single transient error from removing a provider.
+  allowed_fails: 2
+
+  # Cross-tier fallbacks: if ALL providers in a tier fail, fall to the next tier.
+  # Sensitive stays sensitive, nonsensitive stays nonsensitive.
   fallbacks:
     - tier-opus-sensitive: ["tier-sonnet-sensitive"]
     - tier-opus-nonsensitive: ["tier-sonnet-nonsensitive"]
@@ -43,4 +57,7 @@ general_settings:
 
 litellm_settings:
   drop_params: true
-  request_timeout: 60
+  # 120s timeout — some providers (especially thinking models) take time.
+  request_timeout: 120
+  # Map max_tokens → max_completion_tokens for OpenAI gpt-5.4 family.
+  modify_params: true
