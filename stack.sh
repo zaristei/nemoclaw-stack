@@ -42,6 +42,7 @@ LITELLM_CERT_DIR="${STACK_DATA}/certs"
 LITELLM_CERT="${LITELLM_CERT_DIR}/litellm.pem"
 LITELLM_KEY="${LITELLM_CERT_DIR}/litellm-key.pem"
 LITELLM_DB_PATH="${STACK_DATA}/state/litellm.db"
+LITELLM_NONSENSITIVE_PID="${STACK_DATA}/state/litellm-nonsensitive.pid"
 SECRETS_DIR="${STACK_DATA}/secrets"
 SENSITIVE_KEY_FILE="${SECRETS_DIR}/litellm_sensitive_key"
 NONSENSITIVE_KEY_FILE="${SECRETS_DIR}/litellm_nonsensitive_key"
@@ -132,12 +133,21 @@ cmd_ps() {
         mediator_status="not running"
     fi
 
-    echo "Colima:    ${colima_status}"
-    echo "LiteLLM:   ${litellm_status}"
-    echo "Gateway:   ${gateway_status}"
-    echo "Sandbox:   ${sandbox_status}"
-    echo "Bridge:    ${bridge_status}"
-    echo "Mediator:  ${mediator_status}"
+    local nonsensitive_status
+    if [[ -f "$LITELLM_NONSENSITIVE_PID" ]] && kill -0 "$(cat "$LITELLM_NONSENSITIVE_PID")" 2>/dev/null; then
+        nonsensitive_status="running (pid $(cat "$LITELLM_NONSENSITIVE_PID"), :4001 → :4000)"
+    else
+        nonsensitive_status="not running"
+    fi
+
+    echo "Colima:      ${colima_status}"
+    echo "LiteLLM:     ${litellm_status}"
+    echo "  sensitive:  :4000 (ZDR providers only)"
+    echo "  nonsens.:  ${nonsensitive_status}"
+    echo "Gateway:     ${gateway_status}"
+    echo "Sandbox:     ${sandbox_status}"
+    echo "Bridge:      ${bridge_status}"
+    echo "Mediator:    ${mediator_status}"
 }
 
 # ── HEALTH ───────────────────────────────────────────────────────────────────
@@ -328,6 +338,29 @@ cmd_start() {
         log "Scoped API keys already exist."
     fi
 
+    # ── LiteLLM: nonsensitive redirect on port 4001 ───────────────────────
+    # Port 4001 is a TLS pass-through to the same LiteLLM on 4000.
+    # Children with the unrestricted key (mounted file) hit 4001.
+    # The trust spec classifies 4000 as trusted (sensitive) and 4001 as
+    # untrusted for PII (nonsensitive providers). Same LiteLLM instance,
+    # different trust boundary for taint analysis.
+    if [[ -f "$LITELLM_NONSENSITIVE_PID" ]] && kill -0 "$(cat "$LITELLM_NONSENSITIVE_PID")" 2>/dev/null; then
+        log "Nonsensitive redirect already running (pid $(cat "$LITELLM_NONSENSITIVE_PID"))"
+    else
+        if command -v socat &>/dev/null; then
+            log "Starting nonsensitive inference redirect (:4001 → :4000)..."
+            nohup socat \
+                OPENSSL-LISTEN:4001,cert="$LITELLM_CERT",key="$LITELLM_KEY",verify=0,fork,reuseaddr \
+                OPENSSL:localhost:4000,verify=0 \
+                > /dev/null 2>&1 &
+            echo $! > "$LITELLM_NONSENSITIVE_PID"
+            log "Nonsensitive redirect started (pid $!, HTTPS :4001 → :4000)"
+        else
+            log "Warning: socat not installed — nonsensitive redirect on :4001 unavailable."
+            log "  Children will share the sensitive endpoint on :4000."
+        fi
+    fi
+
     # ── OpenShell: build CLI ────────────────────────────────────────────────
     log "Building OpenShell CLI (incremental)..."
     (
@@ -349,6 +382,7 @@ cmd_start() {
     # sandbox process can bootstrap it.
     export MEDIATOR_SOCKET="$MEDIATOR_SOCK"
     export MEDIATOR_DB="sqlite://${MEDIATOR_DB}?mode=rwc"
+    export INIT_INFERENCE_ENDPOINT="https://host.docker.internal:4000/*"
     if [[ -n "${APPROVAL_BOT_TOKEN:-}" ]]; then
         export APPROVAL_BRIDGE_URL="http://localhost:8090"
     fi
@@ -464,7 +498,8 @@ cmd_stop() {
     # ── Approval Bridge ─────────────────────────────────────────────────────
     _stop_pid_file "$BRIDGE_PID" "approval bridge"
 
-    # ── LiteLLM ─────────────────────────────────────────────────────────────
+    # ── LiteLLM + nonsensitive redirect ────────────────────────────────────
+    _stop_pid_file "$LITELLM_NONSENSITIVE_PID" "nonsensitive redirect"
     _stop_pid_file "$LITELLM_PID" "LiteLLM"
 
     # ── Orphaned processes ──────────────────────────────────────────────────
