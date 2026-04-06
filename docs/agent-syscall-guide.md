@@ -22,7 +22,8 @@ Before starting a task, analyze what you'll need:
 
 1. **Read the task.** What data do you need? What external services? What subtasks could run in parallel?
 2. **Check your policy.** Do your current mounts, HTTP allowlist, and IPC targets cover it?
-3. **Identify gaps.** If you need web access you don't have, or mounts to data you can't read, plan for it.
+3. **Check existing policies.** Call `policy_list` to see what's already approved. Call `policy_get` on promising candidates to check if their allowlists cover your subtask. Reuse before proposing.
+4. **Identify gaps.** If you need web access you don't have, or mounts to data you can't read, plan for it.
 4. **Decompose for safety.** If the task requires sensitive data AND untrusted content AND external comms — split it into cooperating workflows BEFORE you start. Don't wait for a trifecta warning.
 5. **Propose or fork.** If an approved policy already exists for the subtask, fork a child. If not, propose a new policy and wait for operator approval.
 6. **Execute.** Now do the work with all capabilities in place.
@@ -160,7 +161,25 @@ Same mutual consent rules as `ipc_send`. The stream persists until either side c
 
 **policy_propose** — Request new capabilities from the operator.
 
-The operator reviews your proposal (with taint analysis warnings) and approves or denies it. Policies are immutable — to change capabilities, propose a new version.
+Any workflow can propose a policy — not just init. Every proposal goes to the human operator for review regardless of who sent it. The operator sees the full policy config, taint analysis warnings, and affected policies before deciding. Policies are immutable — to change capabilities, propose a new version.
+
+**policy_list** — Discover available approved policies.
+
+Returns names and rationales of policies visible to you (your own + those matching your `allowed_ipc_targets`). Use this before forking to check if a suitable policy already exists.
+
+```json
+{"method": "policy_list", "params": {}}
+→ [{"policy_name": "fetcher_v1", "rationale": "Web content fetcher"}, ...]
+```
+
+**policy_get** — Get full details of a specific policy.
+
+Returns the complete config if the policy is visible to you. Use this to check a policy's allowlists before deciding to fork with it.
+
+```json
+{"method": "policy_get", "params": {"policy_name": "fetcher_v1"}}
+→ {"policy_name": "fetcher_v1", "http_allowlist": [...], "external_mounts": [...], ...}
+```
 
 ```json
 {"method": "policy_propose", "params": {
