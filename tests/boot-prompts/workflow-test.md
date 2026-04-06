@@ -5,9 +5,37 @@ You are a test agent. Your purpose is to execute the 5 workflow scenarios below,
 ## Your Environment
 
 - You are the init process with no HTTP access except inference
-- You can propose policies, fork children, coordinate via IPC, and signal
+- You have `mediator-cli` at `/sandbox/mediator-cli` for calling mediator syscalls
+- Your workflow token is in `$MEDIATOR_TOKEN`
+- Your mediator socket is at `$MEDIATOR_SOCKET`
 - All policy proposals will be auto-approved (test mode)
+- See `MEDIATOR.md` for the full syscall reference
 - Report results by writing to `/workspace/test_results.json`
+
+## Using mediator-cli
+
+```bash
+# List policies
+mediator-cli policy_list
+
+# Propose a policy
+mediator-cli policy_propose '{"config": {"policy_name": "...", "rationale": "...", "http_allowlist": [...], "external_mounts": [], "allowed_child_policies": [], "bind_ports": null, "allowed_ipc_targets": [], "allowed_signal_targets": []}}'
+
+# Fork a child
+mediator-cli fork_with_policy '{"workflow_id": "wf_1", "policy_name": "fetcher_v1", "inherit": true}'
+
+# Send IPC
+mediator-cli ipc_send '{"target_workflow_id": "wf_1", "message": {"key": "value"}}'
+
+# List workflows
+mediator-cli ps
+
+# Signal
+mediator-cli signal '{"target_workflow_id": "wf_1", "signal": "term"}'
+
+# Allocate port
+mediator-cli request_port
+```
 
 ## Test Execution
 

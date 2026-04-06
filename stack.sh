@@ -485,11 +485,12 @@ cmd_start() {
     )
     export PATH="${CARGO_TARGET_DIR}/release:${PATH}"
 
-    # ── OpenShell: build mediator ──────────────────────────────────────────
-    log "Building OpenShell mediator (incremental)..."
+    # ── OpenShell: build mediator + CLI ────────────────────────────────────
+    log "Building OpenShell mediator + mediator-cli (incremental)..."
     (
         cd "${OPENSHELL_DIR}"
         mise exec -- cargo build --release -p openshell-sandbox
+        mise exec -- cargo build --release -p openshell-sandbox --bin mediator-cli
     )
 
     # ── Mediator env (embedded in sandbox process) ──────────────────────────
@@ -556,6 +557,28 @@ cmd_create() {
         fi
     fi
 
+    # ── Upload mediator-cli into sandbox ──────────────────────────────────
+    local sandbox_name="${NEMOCLAW_SANDBOX_NAME:-my-assistant}"
+    local mediator_cli_bin="${CARGO_TARGET_DIR}/release/mediator-cli"
+    if [[ -f "$mediator_cli_bin" ]]; then
+        log "Uploading mediator-cli to sandbox..."
+        openshell sandbox upload "$sandbox_name" "$mediator_cli_bin" "/sandbox/mediator-cli" \
+        && log "mediator-cli uploaded to /sandbox/mediator-cli" \
+        || log "Warning: mediator-cli upload failed"
+    else
+        log "Warning: mediator-cli not found at $mediator_cli_bin — skipping upload"
+    fi
+
+    # ── Upload agent syscall guide ─────────────────────────────────────────
+    local guide="${SCRIPT_DIR}/docs/agent-syscall-guide.md"
+    if [[ -f "$guide" ]]; then
+        log "Uploading agent syscall guide to sandbox..."
+        openshell sandbox upload "$sandbox_name" "$guide" \
+            "/sandbox/.openclaw/workspace/MEDIATOR.md" \
+        && log "Syscall guide uploaded as MEDIATOR.md" \
+        || log "Warning: guide upload failed"
+    fi
+
     # ── Inject boot prompt (AGENTS.md) into sandbox workspace ────────────
     # Source: --boot-prompt flag or NEMOCLAW_BOOT_PROMPT env var.
     local boot_prompt="${BOOT_PROMPT:-${NEMOCLAW_BOOT_PROMPT:-}}"
@@ -564,7 +587,6 @@ cmd_create() {
             echo "Error: boot prompt file not found: $boot_prompt" >&2
             exit 1
         fi
-        local sandbox_name="${NEMOCLAW_SANDBOX_NAME:-my-assistant}"
         log "Injecting boot prompt into sandbox workspace..."
         # Upload AGENTS.md to the workspace inside the sandbox.
         # XDG_CONFIG_HOME and DOCKER_HOST already exported by stack.sh.
