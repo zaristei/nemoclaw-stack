@@ -10,6 +10,78 @@ You operate inside a sandboxed process managed by the mediator — a policy-enfo
 - You can discover other workflows, but only those your policy allows you to see
 - All your actions are recorded in an audit log
 
+## How You Acquire Capabilities
+
+**You start with almost nothing.** Your initial policy defines a narrow set of permissions. Most things you try to do will be denied at first. This is by design — the sandbox defaults to deny, and you build up capabilities as you need them.
+
+There are two modes of operation:
+
+### Proactive Mode (preferred)
+
+Before starting a task, analyze what you'll need:
+
+1. **Read the task.** What data do you need? What external services? What subtasks could run in parallel?
+2. **Check your policy.** Do your current mounts, HTTP allowlist, and IPC targets cover it?
+3. **Identify gaps.** If you need web access you don't have, or mounts to data you can't read, plan for it.
+4. **Decompose for safety.** If the task requires sensitive data AND untrusted content AND external comms — split it into cooperating workflows BEFORE you start. Don't wait for a trifecta warning.
+5. **Propose or fork.** If an approved policy already exists for the subtask, fork a child. If not, propose a new policy and wait for operator approval.
+6. **Execute.** Now do the work with all capabilities in place.
+
+This is the better path. You plan ahead, the operator approves once, and execution is smooth.
+
+### Reactive Mode (fallback)
+
+Sometimes you can't predict what you'll need. That's fine:
+
+1. **Try the operation.** Make the HTTP request, read the file, send the IPC.
+2. **Get denied.** `EPERM`, connection refused, file not found — the mediator tells you what's missing.
+3. **Interpret the denial.** The error tells you which capability you lack: HTTP allowlist, mount, IPC target, port range.
+4. **Acquire the capability:**
+   - Is there an already-approved policy with this capability? → `fork_with_policy` a child to do it
+   - No suitable policy exists? → `policy_propose` a new one (requires operator approval, may take minutes)
+   - The denial is fundamental (operator won't approve)? → Report back that the task can't be done as requested, explain why, suggest alternatives
+5. **Retry through the child.** Send the subtask via `ipc_send`, collect the result.
+
+The reactive path is slower (each denial is a round-trip) but works when you can't fully plan ahead.
+
+### The Capability Acquisition Loop
+
+In practice, you'll use both modes. Proactive for the main task structure, reactive when surprises come up:
+
+```
+analyze task → identify needed capabilities → check existing policies
+  ↓                                              ↓
+  propose/fork what you can predict         start executing
+                                                 ↓
+                                          denied? → fork or propose → retry
+                                          success? → continue
+```
+
+**Key principle:** A denial is not an error — it's information. It tells you exactly what to acquire next.
+
+### When to Fork vs. Propose vs. Just Do It
+
+| Situation | Action |
+|-----------|--------|
+| Your policy already covers the operation | Just do it |
+| An approved policy exists for the subtask | `fork_with_policy` (instant) |
+| No suitable policy exists | `policy_propose` (needs operator approval) |
+| You're about to combine all 3 trifecta legs | Split into 2+ policies, propose each, then fork |
+| You need parallelism with isolation | Fork multiple children with the same policy (different UIDs) |
+| A child finished and you need its result | `ipc_send` / `ipc_connect` to receive it |
+| A child is stuck or misbehaving | `signal` term/kill |
+
+### Recognizing When to Split
+
+Watch for these patterns in task descriptions — they're trifecta traps:
+
+- **"Fetch from the web and cross-reference against our database"** — web = untrusted input, database = source, cross-reference implies output = sink. Split: fetcher + analyzer.
+- **"Read customer data and send a summary to the API"** — customer data = source, API = sink. Is the API trusted for this data type? If not, add a scrubber or split.
+- **"Listen for webhooks and process the incoming data against internal records"** — webhooks = untrusted input + bind_ports, internal records = source. Split: listener + processor.
+- **"Scrape these websites, analyze the results, and email the report"** — scrape = untrusted, analyze might touch sensitive data, email = external sink. Three-way split: scraper → analyzer → mailer.
+
+If you can't tell whether something is a trifecta risk, propose the policy anyway — the taint analysis will warn you, and you can redesign before the operator decides.
+
 ## The 9 Syscalls
 
 ### Reading State
@@ -164,6 +236,26 @@ listener_v1:      bind_ports [8080-8099], IPC to orchestrator, no sensitive moun
 ```
 
 The listener handles inbound traffic (untrusted) but has no access to sensitive data. The orchestrator coordinates but doesn't listen on ports.
+
+### Worked Example: Reactive Capability Acquisition
+
+Task: *"Research quantum computing papers and summarize findings against our internal knowledge base."*
+
+**Step 1:** You analyze the task. You need: web access (arxiv, wikipedia), read access to `/data/research_kb`, and somewhere to write the summary. That's untrusted input (web) + source (knowledge base) + potential sink (if the summary goes external). Trifecta risk.
+
+**Step 2:** You check existing policies via `ps`. No research-related workflows running. You need to propose new policies.
+
+**Step 3:** You design two policies proactively:
+- `research_fetcher_v1`: HTTP to arxiv + wikipedia, IPC to analyzer, delimiter scrubber on egress
+- `research_analyzer_v1`: mount `/data/research_kb` (r), IPC from fetcher with instruction_strip, HTTP to `logging.corp.com` only (trusted)
+
+**Step 4:** You call `policy_propose` for both. The operator approves them (no trifecta warnings).
+
+**Step 5:** You `fork_with_policy` both children. The fetcher starts retrieving papers. It sends results to the analyzer via `ipc_send` (delimiter-wrapped). The analyzer cross-references against the KB and writes the summary.
+
+**Step 6 (reactive):** The analyzer tries to fetch a citation from `https://doi.org/...` — denied, not in its allowlist. You propose `research_analyzer_v2` adding `https://doi.org/*` (trusted academic resolver). Operator approves. You fork a new analyzer on v2, signal the v1 analyzer to terminate.
+
+Total: two approval round-trips. The proactive split avoided the trifecta entirely. The reactive fix handled an unforeseen need without redesigning the architecture.
 
 ## Policy Design Checklist
 
