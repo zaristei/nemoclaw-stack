@@ -41,6 +41,10 @@ LITELLM_CONFIG="${SCRIPT_DIR}/services/litellm/config/litellm_config.built.yaml"
 LITELLM_CERT_DIR="${STACK_DATA}/certs"
 LITELLM_CERT="${LITELLM_CERT_DIR}/litellm.pem"
 LITELLM_KEY="${LITELLM_CERT_DIR}/litellm-key.pem"
+LITELLM_DB_PATH="${STACK_DATA}/state/litellm.db"
+SECRETS_DIR="${STACK_DATA}/secrets"
+SENSITIVE_KEY_FILE="${SECRETS_DIR}/litellm_sensitive_key"
+NONSENSITIVE_KEY_FILE="${SECRETS_DIR}/litellm_nonsensitive_key"
 BRIDGE_PID="${STACK_DATA}/state/approval-bridge.pid"
 MEDIATOR_PID="${STACK_DATA}/state/mediator.pid"
 MEDIATOR_LOG="${STACK_DATA}/logs/mediator.log"
@@ -262,9 +266,10 @@ cmd_start() {
     if [[ -f "$LITELLM_PID" ]] && kill -0 "$(cat "$LITELLM_PID")" 2>/dev/null; then
         log "LiteLLM already running (pid $(cat "$LITELLM_PID"))"
     else
-        log "Starting LiteLLM proxy (HTTPS)..."
-        mkdir -p "$(dirname "$LITELLM_LOG")" "$(dirname "$LITELLM_PID")"
+        log "Starting LiteLLM proxy (HTTPS + key management)..."
+        mkdir -p "$(dirname "$LITELLM_LOG")" "$(dirname "$LITELLM_PID")" "$SECRETS_DIR"
         source "${SCRIPT_DIR}/scripts/resolve-secrets.sh"
+        export DATABASE_URL="sqlite:///${LITELLM_DB_PATH}"
         nohup "$LITELLM_VENV/bin/litellm" \
             --config "$LITELLM_CONFIG" \
             --port 4000 \
@@ -273,6 +278,54 @@ cmd_start() {
             > "$LITELLM_LOG" 2>&1 &
         echo $! > "$LITELLM_PID"
         log "LiteLLM started (pid $!, HTTPS on :4000, log: $LITELLM_LOG)"
+    fi
+
+    # ── LiteLLM: generate scoped API keys ──────────────────────────────────
+    # Two keys: sensitive-only (default for init) and unrestricted (opt-in via mount).
+    # Keys persist in LiteLLM's SQLite DB — only generated if not already on disk.
+    if [[ ! -f "$SENSITIVE_KEY_FILE" ]] || [[ ! -f "$NONSENSITIVE_KEY_FILE" ]]; then
+        log "Generating scoped LiteLLM API keys..."
+        _wait_for_litellm
+
+        local base="https://localhost:4000"
+        local auth="Authorization: Bearer ${LITELLM_MASTER_KEY}"
+
+        # Sensitive-only key: restricted to ZDR provider tiers
+        local sensitive_resp
+        sensitive_resp=$(curl -sk -X POST "${base}/key/generate" \
+            -H "$auth" -H "Content-Type: application/json" \
+            -d '{
+                "models": ["tier-opus-sensitive", "tier-sonnet-sensitive", "tier-haiku-sensitive"],
+                "key_alias": "sensitive-only",
+                "metadata": {"purpose": "init and sensitive workloads — ZDR providers only"}
+            }' 2>/dev/null)
+        local sensitive_key
+        sensitive_key=$(echo "$sensitive_resp" | python3 -c "import sys,json; print(json.load(sys.stdin)['key'])" 2>/dev/null)
+
+        # Unrestricted key: all models including nonsensitive tiers
+        local all_resp
+        all_resp=$(curl -sk -X POST "${base}/key/generate" \
+            -H "$auth" -H "Content-Type: application/json" \
+            -d '{
+                "key_alias": "unrestricted",
+                "metadata": {"purpose": "nonsensitive workloads — all providers including Chinese/open-weight"}
+            }' 2>/dev/null)
+        local all_key
+        all_key=$(echo "$all_resp" | python3 -c "import sys,json; print(json.load(sys.stdin)['key'])" 2>/dev/null)
+
+        if [[ -n "$sensitive_key" ]] && [[ -n "$all_key" ]]; then
+            echo "$sensitive_key" > "$SENSITIVE_KEY_FILE"
+            chmod 0400 "$SENSITIVE_KEY_FILE"
+            echo "$all_key" > "$NONSENSITIVE_KEY_FILE"
+            chmod 0400 "$NONSENSITIVE_KEY_FILE"
+            log "API keys generated: sensitive (init default), unrestricted (opt-in mount)"
+        else
+            log "Warning: failed to generate scoped keys. Falling back to master key."
+            log "  sensitive response: $sensitive_resp"
+            log "  unrestricted response: $all_resp"
+        fi
+    else
+        log "Scoped API keys already exist."
     fi
 
     # ── OpenShell: build CLI ────────────────────────────────────────────────
@@ -334,7 +387,14 @@ cmd_create() {
     export NEMOCLAW_SANDBOX_NAME="${NEMOCLAW_SANDBOX_NAME:-my-assistant}"
     export NEMOCLAW_POLICY_MODE="${NEMOCLAW_POLICY_MODE:-suggested}"
     [[ -n "${NEMOCLAW_POLICY_PRESETS:-}" ]] && export NEMOCLAW_POLICY_PRESETS
-    export COMPATIBLE_API_KEY="${LITELLM_MASTER_KEY}"
+    # Use scoped sensitive-only key as default. Falls back to master key
+    # if scoped keys weren't generated (e.g. LiteLLM DB mode unavailable).
+    if [[ -f "$SENSITIVE_KEY_FILE" ]]; then
+        export COMPATIBLE_API_KEY="$(cat "$SENSITIVE_KEY_FILE")"
+    else
+        export COMPATIBLE_API_KEY="${LITELLM_MASTER_KEY}"
+        log "Warning: using master key — scoped keys not available"
+    fi
 
     run_onboard() {
         node "${NEMOCLAW_DIR}/bin/nemoclaw.js" onboard \
@@ -432,6 +492,7 @@ cmd_stop() {
         rm -rf "${STACK_DATA}/config"
         rm -rf "${STACK_DATA}/venv"
         rm -rf "${STACK_DATA}/certs"
+        rm -rf "${STACK_DATA}/secrets"
         log "State wiped."
     fi
 
@@ -453,6 +514,20 @@ EOF
 }
 
 # ── Helpers ──────────────────────────────────────────────────────────────────
+_wait_for_litellm() {
+    local max_wait=30
+    local elapsed=0
+    while ! curl -sfk --max-time 2 "https://localhost:4000/health/liveliness" \
+        -H "Authorization: Bearer ${LITELLM_MASTER_KEY}" >/dev/null 2>&1; do
+        sleep 1
+        ((elapsed++))
+        if [[ $elapsed -ge $max_wait ]]; then
+            log "Warning: LiteLLM did not become ready within ${max_wait}s"
+            return 1
+        fi
+    done
+}
+
 _stop_pid_file() {
     local pidfile="$1" label="$2"
     if [[ -f "$pidfile" ]]; then

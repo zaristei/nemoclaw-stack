@@ -35,6 +35,12 @@ router_settings:
 # ============================================================
 # GENERAL SETTINGS
 # ============================================================
+general_settings:
+  # master_key read from LITELLM_MASTER_KEY env var.
+  # database_url read from DATABASE_URL env var (sqlite, set by stack.sh).
+  # Virtual keys enable per-workflow model tier restrictions.
+  master_key: os.environ/LITELLM_MASTER_KEY
+
 litellm_settings:
   drop_params: true
   request_timeout: 60
