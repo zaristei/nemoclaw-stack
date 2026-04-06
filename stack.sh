@@ -59,6 +59,7 @@ COMMAND="${1:-help}"
 shift || true
 
 CLEAN=0
+HEALTH_FULL=0
 if [[ "$COMMAND" != "run" ]]; then
     while [[ $# -gt 0 ]]; do
         case "$1" in
@@ -68,6 +69,10 @@ if [[ "$COMMAND" != "run" ]]; then
                 ;;
             --clean)
                 CLEAN=1
+                shift
+                ;;
+            --full)
+                HEALTH_FULL=1
                 shift
                 ;;
             *)
@@ -92,7 +97,7 @@ Commands:
   create                       Create sandbox and onboard NemoClaw
   stop  [--clean]              Graceful teardown (--clean wipes state dirs)
   ps                           Show component status
-  health                       Test LiteLLM and provider connectivity
+  health [--full]              Test LiteLLM and provider connectivity (--full tests all OpenRouter providers)
   env                          Print shell exports (use: eval \$(./stack.sh env))
   run <cmd...>                 Run a command with stack env loaded
 
@@ -247,6 +252,78 @@ cmd_health() {
             all_ok=false
         fi
     done
+
+    # ── Full OpenRouter provider test (--full only) ────────────────────────
+    if [[ "$HEALTH_FULL" -eq 1 ]]; then
+        echo ""
+        echo "=== OpenRouter providers (--full) ==="
+        echo "  Testing each whitelisted provider individually..."
+        echo "  (this may take several minutes)"
+
+        local providers_file="${SCRIPT_DIR}/services/litellm/config/trusted_providers.yaml"
+        if [[ ! -f "$providers_file" ]]; then
+            echo "  ✗ trusted_providers.yaml not found"
+        else
+            local or_key="${OPENROUTER_API_KEY:-}"
+            if [[ -z "$or_key" ]]; then
+                echo "  ✗ OPENROUTER_API_KEY not set — skipping"
+            else
+                # Parse provider names from YAML list
+                local providers
+                providers=$(python3 -c "
+import yaml, sys
+with open('$providers_file') as f:
+    data = yaml.safe_load(f)
+if isinstance(data, list):
+    for p in data:
+        print(p)
+elif isinstance(data, dict):
+    for p in data.get('providers', data.get('trusted_providers', [])):
+        print(p)
+" 2>/dev/null)
+
+                local or_ok=0 or_fail=0 or_total=0
+                while IFS= read -r provider; do
+                    [[ -z "$provider" ]] && continue
+                    ((or_total++))
+
+                    # Use OpenRouter's provider routing to force this specific provider
+                    # with a cheap model (meta-llama/llama-3.3-8b-instruct:free or similar)
+                    local resp content
+                    resp=$(curl -sk --max-time 20 "https://openrouter.ai/api/v1/chat/completions" \
+                        -H "Authorization: Bearer ${or_key}" \
+                        -H "Content-Type: application/json" \
+                        -d "{
+                            \"model\": \"meta-llama/llama-3.3-8b-instruct:free\",
+                            \"messages\": [{\"role\": \"user\", \"content\": \"respond with only the word pong\"}],
+                            \"max_tokens\": 5,
+                            \"provider\": {
+                                \"order\": [\"${provider}\"],
+                                \"allow_fallbacks\": false
+                            }
+                        }" 2>&1)
+
+                    content=$(echo "$resp" | python3 -c "import sys,json; r=json.load(sys.stdin); print(r['choices'][0]['message']['content'])" 2>/dev/null || true)
+
+                    if [[ -n "$content" ]]; then
+                        echo "  ✓ ${provider}"
+                        ((or_ok++))
+                    else
+                        local or_error
+                        or_error=$(echo "$resp" | python3 -c "import sys,json; r=json.load(sys.stdin); e=r.get('error',{}); print(e.get('message','')[:80] if e else '')" 2>/dev/null || true)
+                        echo "  ✗ ${provider}: ${or_error:-no response}"
+                        ((or_fail++))
+                    fi
+                done <<< "$providers"
+
+                echo ""
+                echo "  OpenRouter: ${or_ok}/${or_total} providers reachable, ${or_fail} failed"
+                if [[ $or_fail -gt 0 ]]; then
+                    echo "  (failed providers will be skipped by LiteLLM routing — not fatal)"
+                fi
+            fi
+        fi
+    fi
 
     echo ""
     echo "=== Docker network (host.docker.internal) ==="
