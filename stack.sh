@@ -407,73 +407,41 @@ cmd_start() {
     if [[ ! -d "$LITELLM_VENV" ]]; then
         log "Creating LiteLLM venv..."
         python3 -m venv "$LITELLM_VENV"
-        "$LITELLM_VENV/bin/pip" install --quiet 'litellm[proxy]'
+        "$LITELLM_VENV/bin/pip" install --quiet 'litellm[proxy]' prisma
+        # Generate Prisma client for database mode (SQLite key management).
+        local schema_path
+        schema_path=$("$LITELLM_VENV/bin/python3" -c \
+            "import litellm,os; print(os.path.join(os.path.dirname(litellm.__file__),'proxy','schema.prisma'))")
+        PATH="$LITELLM_VENV/bin:$PATH" prisma generate --schema="$schema_path" 2>/dev/null || \
+            log "Warning: prisma generate failed — key scoping may not work"
     fi
 
     if [[ -f "$LITELLM_PID" ]] && kill -0 "$(cat "$LITELLM_PID")" 2>/dev/null; then
         log "LiteLLM already running (pid $(cat "$LITELLM_PID"))"
     else
-        log "Starting LiteLLM proxy (HTTPS + key management)..."
+        log "Starting LiteLLM proxy (HTTPS)..."
         mkdir -p "$(dirname "$LITELLM_LOG")" "$(dirname "$LITELLM_PID")" "$SECRETS_DIR"
         source "${SCRIPT_DIR}/scripts/resolve-secrets.sh"
-        export DATABASE_URL="sqlite:///${LITELLM_DB_PATH}"
+        # DATABASE_URL for key scoping requires Prisma engine — disabled for now.
+        # export DATABASE_URL="sqlite:///${LITELLM_DB_PATH}"
         nohup "$LITELLM_VENV/bin/litellm" \
             --config "$LITELLM_CONFIG" \
             --port 4000 \
-            --ssl_keyfile "$LITELLM_KEY" \
-            --ssl_certfile "$LITELLM_CERT" \
+            --ssl_keyfile_path "$LITELLM_KEY" \
+            --ssl_certfile_path "$LITELLM_CERT" \
             > "$LITELLM_LOG" 2>&1 &
         echo $! > "$LITELLM_PID"
         log "LiteLLM started (pid $!, HTTPS on :4000, log: $LITELLM_LOG)"
     fi
 
-    # ── LiteLLM: generate scoped API keys ──────────────────────────────────
-    # Two keys: sensitive-only (default for init) and unrestricted (opt-in via mount).
-    # Keys persist in LiteLLM's SQLite DB — only generated if not already on disk.
-    if [[ ! -f "$SENSITIVE_KEY_FILE" ]] || [[ ! -f "$NONSENSITIVE_KEY_FILE" ]]; then
-        log "Generating scoped LiteLLM API keys..."
-        _wait_for_litellm
+    # ── LiteLLM: wait for readiness ──────────────────────────────────────
+    _wait_for_litellm || log "Warning: LiteLLM may not be ready yet"
 
-        local base="https://localhost:4000"
-        local auth="Authorization: Bearer ${LITELLM_MASTER_KEY}"
-
-        # Sensitive-only key: restricted to ZDR provider tiers
-        local sensitive_resp
-        sensitive_resp=$(curl -sk -X POST "${base}/key/generate" \
-            -H "$auth" -H "Content-Type: application/json" \
-            -d '{
-                "models": ["tier-opus-sensitive", "tier-sonnet-sensitive", "tier-haiku-sensitive"],
-                "key_alias": "sensitive-only",
-                "metadata": {"purpose": "init and sensitive workloads — ZDR providers only"}
-            }' 2>/dev/null)
-        local sensitive_key
-        sensitive_key=$(echo "$sensitive_resp" | python3 -c "import sys,json; print(json.load(sys.stdin)['key'])" 2>/dev/null)
-
-        # Unrestricted key: all models including nonsensitive tiers
-        local all_resp
-        all_resp=$(curl -sk -X POST "${base}/key/generate" \
-            -H "$auth" -H "Content-Type: application/json" \
-            -d '{
-                "key_alias": "unrestricted",
-                "metadata": {"purpose": "nonsensitive workloads — all providers including Chinese/open-weight"}
-            }' 2>/dev/null)
-        local all_key
-        all_key=$(echo "$all_resp" | python3 -c "import sys,json; print(json.load(sys.stdin)['key'])" 2>/dev/null)
-
-        if [[ -n "$sensitive_key" ]] && [[ -n "$all_key" ]]; then
-            echo "$sensitive_key" > "$SENSITIVE_KEY_FILE"
-            chmod 0400 "$SENSITIVE_KEY_FILE"
-            echo "$all_key" > "$NONSENSITIVE_KEY_FILE"
-            chmod 0400 "$NONSENSITIVE_KEY_FILE"
-            log "API keys generated: sensitive (init default), unrestricted (opt-in mount)"
-        else
-            log "Warning: failed to generate scoped keys. Falling back to master key."
-            log "  sensitive response: $sensitive_resp"
-            log "  unrestricted response: $all_resp"
-        fi
-    else
-        log "Scoped API keys already exist."
-    fi
+    # NOTE: Per-key model scoping (sensitive vs nonsensitive) requires LiteLLM
+    # database mode with Prisma, which needs a running Prisma engine.
+    # For now, all callers use LITELLM_MASTER_KEY. Model tier enforcement
+    # relies on the agent's system prompt and URL-based trust classification.
+    # TODO: Enable key scoping when Prisma SQLite support is viable.
 
     # ── LiteLLM: nonsensitive redirect on port 4001 ───────────────────────
     # Port 4001 is a TLS pass-through to the same LiteLLM on 4000.
@@ -568,14 +536,7 @@ cmd_create() {
     export NEMOCLAW_SANDBOX_NAME="${NEMOCLAW_SANDBOX_NAME:-my-assistant}"
     export NEMOCLAW_POLICY_MODE="${NEMOCLAW_POLICY_MODE:-suggested}"
     [[ -n "${NEMOCLAW_POLICY_PRESETS:-}" ]] && export NEMOCLAW_POLICY_PRESETS
-    # Use scoped sensitive-only key as default. Falls back to master key
-    # if scoped keys weren't generated (e.g. LiteLLM DB mode unavailable).
-    if [[ -f "$SENSITIVE_KEY_FILE" ]]; then
-        export COMPATIBLE_API_KEY="$(cat "$SENSITIVE_KEY_FILE")"
-    else
-        export COMPATIBLE_API_KEY="${LITELLM_MASTER_KEY}"
-        log "Warning: using master key — scoped keys not available"
-    fi
+    export COMPATIBLE_API_KEY="${LITELLM_MASTER_KEY}"
 
     run_onboard() {
         node "${NEMOCLAW_DIR}/bin/nemoclaw.js" onboard \
@@ -605,11 +566,12 @@ cmd_create() {
         fi
         local sandbox_name="${NEMOCLAW_SANDBOX_NAME:-my-assistant}"
         log "Injecting boot prompt into sandbox workspace..."
-        # Write AGENTS.md to the workspace inside the sandbox.
-        openshell sandbox exec "$sandbox_name" -- bash -c \
-            'mkdir -p ~/.openclaw/workspace && cat > ~/.openclaw/workspace/AGENTS.md' \
-            < "$boot_prompt"
-        log "Boot prompt injected: $boot_prompt → AGENTS.md"
+        # Upload AGENTS.md to the workspace inside the sandbox.
+        # XDG_CONFIG_HOME and DOCKER_HOST already exported by stack.sh.
+        openshell sandbox upload "$sandbox_name" "$boot_prompt" \
+            "/sandbox/.openclaw/workspace/AGENTS.md" \
+        && log "Boot prompt injected: $boot_prompt → AGENTS.md" \
+        || log "Warning: boot prompt injection failed — upload may not be supported yet"
     fi
 
     log "Sandbox ready."
@@ -714,7 +676,7 @@ EOF
 
 # ── Helpers ──────────────────────────────────────────────────────────────────
 _wait_for_litellm() {
-    local max_wait=30
+    local max_wait=90
     local elapsed=0
     while ! curl -sfk --max-time 2 "https://localhost:4000/health/liveliness" \
         -H "Authorization: Bearer ${LITELLM_MASTER_KEY}" >/dev/null 2>&1; do
