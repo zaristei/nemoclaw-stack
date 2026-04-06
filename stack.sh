@@ -164,12 +164,18 @@ cmd_health() {
 
     echo "=== LiteLLM proxy ==="
     if curl -sfk --max-time 5 "${base}/health/liveliness" -H "Authorization: Bearer ${key}" >/dev/null 2>&1; then
-        echo "  proxy: healthy"
+        echo "  :4000 sensitive:    healthy (HTTPS)"
     else
-        echo "  proxy: unreachable"
+        echo "  :4000 sensitive:    unreachable"
         echo ""
         echo "LiteLLM is not running. Start the stack first: ./stack.sh start"
         exit 1
+    fi
+
+    if curl -sfk --max-time 5 "https://localhost:4001/health/liveliness" -H "Authorization: Bearer ${key}" >/dev/null 2>&1; then
+        echo "  :4001 nonsensitive: healthy (HTTPS → :4000)"
+    else
+        echo "  :4001 nonsensitive: not running (socat redirect)"
     fi
 
     echo ""
@@ -208,15 +214,27 @@ cmd_health() {
 
     echo ""
     echo "=== Docker network (host.docker.internal) ==="
+
+    # Sensitive endpoint (:4000)
     if docker run --rm alpine sh -c "apk add --no-cache curl >/dev/null 2>&1 && curl -sfk --max-time 5 https://host.docker.internal:4000/health -H 'Authorization: Bearer ${key}'" >/dev/null 2>&1; then
-        echo "  sandbox → litellm: reachable (HTTPS)"
+        echo "  :4000 sensitive:    reachable (HTTPS)"
     else
-        # 400/401 still means reachable, just not authed for /health
         if docker run --rm alpine sh -c "apk add --no-cache curl >/dev/null 2>&1 && curl -sko /dev/null -w '%{http_code}' --max-time 5 https://host.docker.internal:4000/health" 2>/dev/null | grep -qE '^[2-4]'; then
-            echo "  sandbox → litellm: reachable (HTTPS)"
+            echo "  :4000 sensitive:    reachable (HTTPS)"
         else
-            echo "  sandbox → litellm: unreachable"
+            echo "  :4000 sensitive:    unreachable"
             all_ok=false
+        fi
+    fi
+
+    # Nonsensitive redirect (:4001)
+    if docker run --rm alpine sh -c "apk add --no-cache curl >/dev/null 2>&1 && curl -sfk --max-time 5 https://host.docker.internal:4001/health -H 'Authorization: Bearer ${key}'" >/dev/null 2>&1; then
+        echo "  :4001 nonsensitive: reachable (HTTPS → :4000)"
+    else
+        if docker run --rm alpine sh -c "apk add --no-cache curl >/dev/null 2>&1 && curl -sko /dev/null -w '%{http_code}' --max-time 5 https://host.docker.internal:4001/health" 2>/dev/null | grep -qE '^[2-4]'; then
+            echo "  :4001 nonsensitive: reachable (HTTPS → :4000)"
+        else
+            echo "  :4001 nonsensitive: unreachable (socat may not be running)"
         fi
     fi
 
