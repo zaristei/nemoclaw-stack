@@ -60,6 +60,7 @@ shift || true
 
 CLEAN=0
 HEALTH_FULL=0
+BOOT_PROMPT=""
 if [[ "$COMMAND" != "run" ]]; then
     while [[ $# -gt 0 ]]; do
         case "$1" in
@@ -74,6 +75,10 @@ if [[ "$COMMAND" != "run" ]]; then
             --full)
                 HEALTH_FULL=1
                 shift
+                ;;
+            --boot-prompt)
+                BOOT_PROMPT="${2:?--boot-prompt requires a file path}"
+                shift 2
                 ;;
             *)
                 echo "Unknown option: $1" >&2
@@ -94,7 +99,7 @@ Usage: ./stack.sh <command> [options]
 
 Commands:
   start [--secrets keychain]   Build and start infrastructure services
-  create                       Create sandbox and onboard NemoClaw
+  create [--boot-prompt <file>] Create sandbox and onboard NemoClaw (inject AGENTS.md from file)
   stop  [--clean]              Graceful teardown (--clean wipes state dirs)
   ps                           Show component status
   health [--full]              Test LiteLLM and provider connectivity (--full tests all OpenRouter providers)
@@ -588,6 +593,23 @@ cmd_create() {
             log "Retrying onboard (stale state cleanup)..."
             run_onboard
         fi
+    fi
+
+    # ── Inject boot prompt (AGENTS.md) into sandbox workspace ────────────
+    # Source: --boot-prompt flag or NEMOCLAW_BOOT_PROMPT env var.
+    local boot_prompt="${BOOT_PROMPT:-${NEMOCLAW_BOOT_PROMPT:-}}"
+    if [[ -n "$boot_prompt" ]]; then
+        if [[ ! -f "$boot_prompt" ]]; then
+            echo "Error: boot prompt file not found: $boot_prompt" >&2
+            exit 1
+        fi
+        local sandbox_name="${NEMOCLAW_SANDBOX_NAME:-my-assistant}"
+        log "Injecting boot prompt into sandbox workspace..."
+        # Write AGENTS.md to the workspace inside the sandbox.
+        openshell sandbox exec "$sandbox_name" -- bash -c \
+            'mkdir -p ~/.openclaw/workspace && cat > ~/.openclaw/workspace/AGENTS.md' \
+            < "$boot_prompt"
+        log "Boot prompt injected: $boot_prompt → AGENTS.md"
     fi
 
     log "Sandbox ready."
