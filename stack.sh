@@ -60,6 +60,7 @@ shift || true
 
 CLEAN=0
 HEALTH_FULL=0
+VERIFY_FIX=0
 if [[ "$COMMAND" != "run" ]]; then
     while [[ $# -gt 0 ]]; do
         case "$1" in
@@ -73,6 +74,10 @@ if [[ "$COMMAND" != "run" ]]; then
                 ;;
             --full)
                 HEALTH_FULL=1
+                shift
+                ;;
+            --fix)
+                VERIFY_FIX=1
                 shift
                 ;;
             *)
@@ -98,6 +103,7 @@ Commands:
   stop  [--clean]              Graceful teardown (--clean wipes state dirs)
   ps                           Show component status
   health [--full]              Test LiteLLM and provider connectivity (--full tests all OpenRouter providers)
+  verify-models [--fix]        Verify all model IDs against live APIs (--fix removes "# verify" on pass)
   env                          Print shell exports (use: eval \$(./stack.sh env))
   run <cmd...>                 Run a command with stack env loaded
 
@@ -719,6 +725,13 @@ case "$COMMAND" in
     stop)   cmd_stop ;;
     ps)     cmd_ps ;;
     health) cmd_health ;;
+    verify-models)
+        if [[ "$VERIFY_FIX" -eq 1 ]]; then
+            exec "${SCRIPT_DIR}/scripts/verify-models.sh" --fix
+        else
+            exec "${SCRIPT_DIR}/scripts/verify-models.sh"
+        fi
+        ;;
     env)    cmd_env ;;
     run)    cmd_run "$@" ;;
     help|--help|-h) cmd_help ;;
