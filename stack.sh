@@ -10,7 +10,7 @@
 # Environment:
 #   STACK_ROOT              Storage root (default: /Volumes/macmini1)
 #   NEMOCLAW_MODEL          Model for NemoClaw inference (default: tier-haiku-sensitive)
-#   NEMOCLAW_ENDPOINT       LiteLLM endpoint URL (default: http://host.docker.internal:4000/v1)
+#   NEMOCLAW_ENDPOINT       LiteLLM endpoint URL (default: https://host.docker.internal:4000/v1)
 #   NEMOCLAW_SANDBOX_NAME   Sandbox name (default: my-assistant)
 #   NEMOCLAW_POLICY_MODE    Policy preset mode: suggested, custom, skip (default: suggested)
 #   NEMOCLAW_POLICY_PRESETS Comma-separated preset names (used with NEMOCLAW_POLICY_MODE=custom)
@@ -38,6 +38,9 @@ LITELLM_VENV="${STACK_DATA}/venv/litellm"
 LITELLM_PID="${STACK_DATA}/state/litellm.pid"
 LITELLM_LOG="${STACK_DATA}/logs/litellm.log"
 LITELLM_CONFIG="${SCRIPT_DIR}/services/litellm/config/litellm_config.built.yaml"
+LITELLM_CERT_DIR="${STACK_DATA}/certs"
+LITELLM_CERT="${LITELLM_CERT_DIR}/litellm.pem"
+LITELLM_KEY="${LITELLM_CERT_DIR}/litellm-key.pem"
 BRIDGE_PID="${STACK_DATA}/state/approval-bridge.pid"
 MEDIATOR_PID="${STACK_DATA}/state/mediator.pid"
 MEDIATOR_LOG="${STACK_DATA}/logs/mediator.log"
@@ -143,10 +146,10 @@ cmd_health() {
         exit 1
     fi
 
-    local base="http://localhost:4000"
+    local base="https://localhost:4000"
 
     echo "=== LiteLLM proxy ==="
-    if curl -sf --max-time 5 "${base}/health/liveliness" -H "Authorization: Bearer ${key}" >/dev/null 2>&1; then
+    if curl -sfk --max-time 5 "${base}/health/liveliness" -H "Authorization: Bearer ${key}" >/dev/null 2>&1; then
         echo "  proxy: healthy"
     else
         echo "  proxy: unreachable"
@@ -173,7 +176,7 @@ cmd_health() {
         local model="${entry#*:}"
         local resp content error
 
-        resp=$(curl -s --max-time 15 "${base}/v1/chat/completions" \
+        resp=$(curl -sk --max-time 15 "${base}/v1/chat/completions" \
             -H "Authorization: Bearer ${key}" \
             -H "Content-Type: application/json" \
             -d "{\"model\":\"${model}\",\"messages\":[{\"role\":\"user\",\"content\":\"respond with only the word pong\"}],\"max_tokens\":5}" 2>&1)
@@ -191,12 +194,12 @@ cmd_health() {
 
     echo ""
     echo "=== Docker network (host.docker.internal) ==="
-    if docker run --rm alpine sh -c "apk add --no-cache curl >/dev/null 2>&1 && curl -sf --max-time 5 http://host.docker.internal:4000/health -H 'Authorization: Bearer ${key}'" >/dev/null 2>&1; then
-        echo "  sandbox → litellm: reachable"
+    if docker run --rm alpine sh -c "apk add --no-cache curl >/dev/null 2>&1 && curl -sfk --max-time 5 https://host.docker.internal:4000/health -H 'Authorization: Bearer ${key}'" >/dev/null 2>&1; then
+        echo "  sandbox → litellm: reachable (HTTPS)"
     else
         # 400/401 still means reachable, just not authed for /health
-        if docker run --rm alpine sh -c "apk add --no-cache curl >/dev/null 2>&1 && curl -so /dev/null -w '%{http_code}' --max-time 5 http://host.docker.internal:4000/health" 2>/dev/null | grep -qE '^[2-4]'; then
-            echo "  sandbox → litellm: reachable"
+        if docker run --rm alpine sh -c "apk add --no-cache curl >/dev/null 2>&1 && curl -sko /dev/null -w '%{http_code}' --max-time 5 https://host.docker.internal:4000/health" 2>/dev/null | grep -qE '^[2-4]'; then
+            echo "  sandbox → litellm: reachable (HTTPS)"
         else
             echo "  sandbox → litellm: unreachable"
             all_ok=false
@@ -235,6 +238,20 @@ cmd_start() {
         python3 "${SCRIPT_DIR}/scripts/build_litellm_config.py"
     fi
 
+    # ── TLS certs for LiteLLM ──────────────────────────────────────────────
+    if [[ ! -f "$LITELLM_CERT" ]]; then
+        log "Generating TLS certificate for LiteLLM..."
+        mkdir -p "$LITELLM_CERT_DIR"
+        openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:prime256v1 \
+            -keyout "$LITELLM_KEY" \
+            -out "$LITELLM_CERT" \
+            -days 365 -nodes \
+            -subj "/CN=litellm" \
+            -addext "subjectAltName=DNS:localhost,DNS:host.docker.internal,IP:127.0.0.1" \
+            2>/dev/null
+        log "TLS cert created (valid 365 days): $LITELLM_CERT"
+    fi
+
     # ── LiteLLM: install + run ──────────────────────────────────────────────
     if [[ ! -d "$LITELLM_VENV" ]]; then
         log "Creating LiteLLM venv..."
@@ -245,15 +262,17 @@ cmd_start() {
     if [[ -f "$LITELLM_PID" ]] && kill -0 "$(cat "$LITELLM_PID")" 2>/dev/null; then
         log "LiteLLM already running (pid $(cat "$LITELLM_PID"))"
     else
-        log "Starting LiteLLM proxy..."
+        log "Starting LiteLLM proxy (HTTPS)..."
         mkdir -p "$(dirname "$LITELLM_LOG")" "$(dirname "$LITELLM_PID")"
         source "${SCRIPT_DIR}/scripts/resolve-secrets.sh"
         nohup "$LITELLM_VENV/bin/litellm" \
             --config "$LITELLM_CONFIG" \
             --port 4000 \
+            --ssl_keyfile "$LITELLM_KEY" \
+            --ssl_certfile "$LITELLM_CERT" \
             > "$LITELLM_LOG" 2>&1 &
         echo $! > "$LITELLM_PID"
-        log "LiteLLM started (pid $!, log: $LITELLM_LOG)"
+        log "LiteLLM started (pid $!, HTTPS on :4000, log: $LITELLM_LOG)"
     fi
 
     # ── OpenShell: build CLI ────────────────────────────────────────────────
@@ -310,7 +329,7 @@ cmd_create() {
     export NEMOCLAW_SKIP_VALIDATE=1
     export NEMOCLAW_ACCEPT_THIRD_PARTY_SOFTWARE=1
     export NEMOCLAW_PROVIDER=custom
-    export NEMOCLAW_ENDPOINT_URL="${NEMOCLAW_ENDPOINT:-http://host.docker.internal:4000/v1}"
+    export NEMOCLAW_ENDPOINT_URL="${NEMOCLAW_ENDPOINT:-https://host.docker.internal:4000/v1}"
     export NEMOCLAW_MODEL="${NEMOCLAW_MODEL:-tier-haiku-sensitive}"
     export NEMOCLAW_SANDBOX_NAME="${NEMOCLAW_SANDBOX_NAME:-my-assistant}"
     export NEMOCLAW_POLICY_MODE="${NEMOCLAW_POLICY_MODE:-suggested}"
@@ -412,6 +431,7 @@ cmd_stop() {
         rm -rf "${STACK_DATA}/state"
         rm -rf "${STACK_DATA}/config"
         rm -rf "${STACK_DATA}/venv"
+        rm -rf "${STACK_DATA}/certs"
         log "State wiped."
     fi
 
