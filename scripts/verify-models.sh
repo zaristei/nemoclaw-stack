@@ -1,61 +1,48 @@
 #!/usr/bin/env bash
 # Verify all model IDs in the LiteLLM config against live provider APIs.
 #
-# Usage:
-#   ./scripts/verify-models.sh              # verify all models
-#   ./scripts/verify-models.sh --fix        # verify and remove "# verify" comments for passing models
+# Tests each model individually (not by tier) to catch bad IDs that
+# LiteLLM would route around. Exits non-zero if any model fails.
 #
-# Requires: LiteLLM running on https://localhost:4000, API keys in env.
-# Run after: ./stack.sh start
+# Usage:
+#   ./scripts/verify-models.sh           # verify all models
+#
+# Requires: API keys in env (source resolve-secrets.sh first).
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 REPO_DIR="${SCRIPT_DIR}/.."
 MODELS_FILE="${REPO_DIR}/services/litellm/config/models.yaml"
-STACK_DATA="${STACK_ROOT:-/Volumes/macmini1}/nemoclaw-stack"
-
-FIX=0
-[[ "${1:-}" == "--fix" ]] && FIX=1
 
 # ── Resolve secrets ─────────────────────────────────────────────────────
 source "${SCRIPT_DIR}/resolve-secrets.sh"
 
-LITELLM_BASE="https://localhost:4000"
-LITELLM_KEY="${LITELLM_MASTER_KEY:-}"
 OR_KEY="${OPENROUTER_API_KEY:-}"
 
-if [[ -z "$LITELLM_KEY" ]]; then
-    echo "Error: LITELLM_MASTER_KEY not set" >&2
-    exit 1
+# ── Fetch OpenRouter model list once ────────────────────────────────────
+OR_MODELS=""
+if [[ -n "$OR_KEY" ]]; then
+    OR_MODELS=$(curl -sk --max-time 15 "https://openrouter.ai/api/v1/models" \
+        -H "Authorization: Bearer ${OR_KEY}" 2>/dev/null | \
+        python3 -c "import sys,json; [print(m['id']) for m in json.load(sys.stdin).get('data',[])]" 2>/dev/null || true)
 fi
 
-# Check LiteLLM is running
-if ! curl -sfk --max-time 5 "${LITELLM_BASE}/health/liveliness" \
-    -H "Authorization: Bearer ${LITELLM_KEY}" >/dev/null 2>&1; then
-    echo "Error: LiteLLM not reachable at ${LITELLM_BASE}" >&2
-    echo "Run ./stack.sh start first." >&2
-    exit 1
-fi
-
-# ── Extract model IDs from YAML ─────────────────────────────────────────
-# Parse all unique model IDs and their tier names
+# ── Extract unique model IDs from YAML ──────────────────────────────────
 models=$(python3 -c "
 import yaml, sys
 
 with open('$MODELS_FILE') as f:
-    content = f.read()
-
-# Parse YAML (anchors get resolved automatically)
-data = yaml.safe_load(content)
+    data = yaml.safe_load(f)
 
 seen = set()
 for entry in data.get('model_list', []):
     params = entry.get('litellm_params', {})
     model = params.get('model', '')
     tier = entry.get('model_name', '')
-    if model and (model, tier) not in seen:
-        seen.add((model, tier))
-        print(f'{tier}|{model}')
+    api_key_ref = params.get('api_key', '')
+    if model and model not in seen:
+        seen.add(model)
+        print(f'{model}|{tier}|{api_key_ref}')
 " 2>/dev/null)
 
 if [[ -z "$models" ]]; then
@@ -63,67 +50,148 @@ if [[ -z "$models" ]]; then
     exit 1
 fi
 
-# ── Test each model ──────────────────────────────────────────────────────
+# ── Test each model directly against its provider ────────────────────────
 total=0
 ok=0
 fail=0
 failed_models=()
-verified_models=()
 
 echo "=== Model ID Verification ==="
-echo "  Testing each model against live APIs via LiteLLM..."
 echo ""
 
-while IFS='|' read -r tier model; do
+while IFS='|' read -r model tier api_key_ref; do
     [[ -z "$model" ]] && continue
     ((total++))
 
-    # For OpenRouter models, also check the model exists on OpenRouter directly
-    or_check=""
+    # Determine provider and test method
     if [[ "$model" == openrouter/* ]]; then
+        # OpenRouter: check model list + test via OpenRouter API directly
         or_model="${model#openrouter/}"
-        if [[ -n "$OR_KEY" ]]; then
-            # Quick check: does OpenRouter know this model?
-            or_resp=$(curl -sk --max-time 10 "https://openrouter.ai/api/v1/models" \
-                -H "Authorization: Bearer ${OR_KEY}" 2>/dev/null)
-            if echo "$or_resp" | python3 -c "
-import sys, json
-data = json.load(sys.stdin)
-ids = [m['id'] for m in data.get('data', [])]
-sys.exit(0 if '${or_model}' in ids else 1)
-" 2>/dev/null; then
-                or_check=" [OR: listed]"
-            else
-                or_check=" [OR: NOT FOUND in model list]"
+
+        # Check if model exists in OpenRouter's catalog
+        or_listed=false
+        if [[ -n "$OR_MODELS" ]]; then
+            if echo "$OR_MODELS" | grep -qx "$or_model"; then
+                or_listed=true
             fi
         fi
+
+        if [[ "$or_listed" == "false" ]] && [[ -n "$OR_MODELS" ]]; then
+            echo "  ✗ ${model}"
+            echo "    NOT FOUND in OpenRouter model list (tier: ${tier})"
+            ((fail++))
+            failed_models+=("$model")
+            continue
+        fi
+
+        # Test with actual inference call
+        if [[ -n "$OR_KEY" ]]; then
+            resp=$(curl -sk --max-time 30 "https://openrouter.ai/api/v1/chat/completions" \
+                -H "Authorization: Bearer ${OR_KEY}" \
+                -H "Content-Type: application/json" \
+                -d "{
+                    \"model\": \"${or_model}\",
+                    \"messages\": [{\"role\": \"user\", \"content\": \"respond with only the word pong\"}],
+                    \"max_tokens\": 5
+                }" 2>&1)
+        else
+            echo "  ? ${model}"
+            echo "    OPENROUTER_API_KEY not set — skipped (tier: ${tier})"
+            continue
+        fi
+
+    elif [[ "$model" == openai/* ]]; then
+        # OpenAI direct
+        api_key="${OPENAI_API_KEY:-}"
+        [[ -z "$api_key" ]] && { echo "  ? ${model} — OPENAI_API_KEY not set"; continue; }
+        real_model="${model#openai/}"
+        resp=$(curl -sk --max-time 30 "https://api.openai.com/v1/chat/completions" \
+            -H "Authorization: Bearer ${api_key}" \
+            -H "Content-Type: application/json" \
+            -d "{\"model\":\"${real_model}\",\"messages\":[{\"role\":\"user\",\"content\":\"respond with only the word pong\"}],\"max_tokens\":5}" 2>&1)
+
+    elif [[ "$model" == gemini/* ]]; then
+        # Google via LiteLLM format — test with Google's API
+        api_key="${GOOGLE_API_KEY:-}"
+        [[ -z "$api_key" ]] && { echo "  ? ${model} — GOOGLE_API_KEY not set"; continue; }
+        real_model="${model#gemini/}"
+        resp=$(curl -sk --max-time 30 "https://generativelanguage.googleapis.com/v1beta/models/${real_model}:generateContent?key=${api_key}" \
+            -H "Content-Type: application/json" \
+            -d "{\"contents\":[{\"parts\":[{\"text\":\"respond with only the word pong\"}]}],\"generationConfig\":{\"maxOutputTokens\":5}}" 2>&1)
+        # Google has different response format
+        content=$(echo "$resp" | python3 -c "import sys,json; r=json.load(sys.stdin); print(r['candidates'][0]['content']['parts'][0]['text'])" 2>/dev/null || true)
+        error=$(echo "$resp" | python3 -c "import sys,json; e=json.load(sys.stdin).get('error',{}); print(e.get('message','')[:120] if e else '')" 2>/dev/null || true)
+        if [[ -n "$content" ]]; then
+            echo "  ✓ ${model} (tier: ${tier})"
+            ((ok++))
+        else
+            echo "  ✗ ${model}"
+            echo "    error: ${error:-no response / timeout} (tier: ${tier})"
+            ((fail++))
+            failed_models+=("$model")
+        fi
+        continue
+
+    elif [[ "$model" == xai/* ]]; then
+        api_key="${XAI_API_KEY:-}"
+        [[ -z "$api_key" ]] && { echo "  ? ${model} — XAI_API_KEY not set"; continue; }
+        real_model="${model#xai/}"
+        resp=$(curl -sk --max-time 30 "https://api.x.ai/v1/chat/completions" \
+            -H "Authorization: Bearer ${api_key}" \
+            -H "Content-Type: application/json" \
+            -d "{\"model\":\"${real_model}\",\"messages\":[{\"role\":\"user\",\"content\":\"respond with only the word pong\"}],\"max_tokens\":5}" 2>&1)
+
+    elif [[ "$model" == mistral/* ]]; then
+        api_key="${MISTRAL_API_KEY:-}"
+        [[ -z "$api_key" ]] && { echo "  ? ${model} — MISTRAL_API_KEY not set"; continue; }
+        real_model="${model#mistral/}"
+        resp=$(curl -sk --max-time 30 "https://api.mistral.ai/v1/chat/completions" \
+            -H "Authorization: Bearer ${api_key}" \
+            -H "Content-Type: application/json" \
+            -d "{\"model\":\"${real_model}\",\"messages\":[{\"role\":\"user\",\"content\":\"respond with only the word pong\"}],\"max_tokens\":5}" 2>&1)
+
+    elif [[ "$model" == claude-* ]]; then
+        # Anthropic (direct, uses Messages API)
+        api_key="${ANTHROPIC_API_KEY:-}"
+        [[ -z "$api_key" ]] && { echo "  ? ${model} — ANTHROPIC_API_KEY not set"; continue; }
+        resp=$(curl -sk --max-time 30 "https://api.anthropic.com/v1/messages" \
+            -H "x-api-key: ${api_key}" \
+            -H "anthropic-version: 2023-06-01" \
+            -H "Content-Type: application/json" \
+            -d "{\"model\":\"${model}\",\"max_tokens\":5,\"messages\":[{\"role\":\"user\",\"content\":\"respond with only the word pong\"}]}" 2>&1)
+        # Anthropic response format
+        content=$(echo "$resp" | python3 -c "import sys,json; r=json.load(sys.stdin); print(r['content'][0]['text'])" 2>/dev/null || true)
+        error=$(echo "$resp" | python3 -c "import sys,json; e=json.load(sys.stdin).get('error',{}); print(e.get('message','')[:120] if e else '')" 2>/dev/null || true)
+        if [[ -n "$content" ]]; then
+            echo "  ✓ ${model} (tier: ${tier})"
+            ((ok++))
+        else
+            echo "  ✗ ${model}"
+            echo "    error: ${error:-no response / timeout} (tier: ${tier})"
+            ((fail++))
+            failed_models+=("$model")
+        fi
+        continue
+
+    else
+        echo "  ? ${model} — unknown provider format (tier: ${tier})"
+        continue
     fi
 
-    # Test via LiteLLM with a minimal completion
-    resp=$(curl -sk --max-time 30 "${LITELLM_BASE}/v1/chat/completions" \
-        -H "Authorization: Bearer ${LITELLM_KEY}" \
-        -H "Content-Type: application/json" \
-        -d "{
-            \"model\": \"${tier}\",
-            \"messages\": [{\"role\": \"user\", \"content\": \"respond with only the word pong\"}],
-            \"max_tokens\": 5
-        }" 2>&1)
-
+    # Generic OpenAI-format response parsing (for openai, xai, mistral, openrouter)
     content=$(echo "$resp" | python3 -c "import sys,json; r=json.load(sys.stdin); print(r['choices'][0]['message']['content'])" 2>/dev/null || true)
-    served=$(echo "$resp" | python3 -c "import sys,json; print(json.load(sys.stdin).get('model','?'))" 2>/dev/null || echo "?")
     error=$(echo "$resp" | python3 -c "import sys,json; e=json.load(sys.stdin).get('error',{}); print(e.get('message','')[:120] if e else '')" 2>/dev/null || true)
 
     if [[ -n "$content" ]]; then
-        echo "  ✓ ${model}"
-        echo "    tier: ${tier} | served by: ${served}${or_check}"
+        echo "  ✓ ${model} (tier: ${tier})"
         ((ok++))
-        verified_models+=("$model")
     else
         echo "  ✗ ${model}"
-        echo "    tier: ${tier} | error: ${error:-no response / timeout}${or_check}"
+        echo "    error: ${error:-no response / timeout} (tier: ${tier})"
         ((fail++))
         failed_models+=("$model")
     fi
+
 done <<< "$models"
 
 echo ""
@@ -133,39 +201,14 @@ echo "━━━━━━━━━━━━━━━━━━━━━━━━�
 
 if [[ ${#failed_models[@]} -gt 0 ]]; then
     echo ""
-    echo "  Failed models (may cause mid-conversation errors):"
+    echo "  Failed models:"
     for m in "${failed_models[@]}"; do
         echo "    - ${m}"
     done
     echo ""
-    echo "  Action: fix model IDs in ${MODELS_FILE} and rebuild:"
+    echo "  Fix model IDs in ${MODELS_FILE} and rebuild:"
     echo "    python3 scripts/build_litellm_config.py"
 fi
 
-# ── Fix mode: remove "# verify" from passing models ─────────────────────
-if [[ "$FIX" -eq 1 ]] && [[ ${#verified_models[@]} -gt 0 ]]; then
-    echo ""
-    echo "=== Fixing verified models ==="
-    fixed=0
-    for m in "${verified_models[@]}"; do
-        # Escape for sed
-        escaped=$(printf '%s\n' "$m" | sed 's/[[\.*^$()+?{|]/\\&/g')
-        # Remove "# verify" comment on lines containing this model
-        if grep -q "${escaped}.*# verify" "$MODELS_FILE" 2>/dev/null; then
-            sed -i '' "s|\(${escaped}\).*# verify.*|\1|" "$MODELS_FILE" 2>/dev/null || \
-            sed -i "s|\(${escaped}\).*# verify.*|\1|" "$MODELS_FILE" 2>/dev/null || true
-            echo "  ✓ Removed '# verify' from: ${m}"
-            ((fixed++))
-        fi
-    done
-    if [[ $fixed -gt 0 ]]; then
-        echo ""
-        echo "  ${fixed} model(s) verified. Rebuild config:"
-        echo "    python3 scripts/build_litellm_config.py"
-    else
-        echo "  No '# verify' comments to remove."
-    fi
-fi
-
-# Exit with failure if any models failed
+# Exit non-zero if any model failed
 [[ $fail -eq 0 ]]

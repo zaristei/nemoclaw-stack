@@ -60,7 +60,6 @@ shift || true
 
 CLEAN=0
 HEALTH_FULL=0
-VERIFY_FIX=0
 if [[ "$COMMAND" != "run" ]]; then
     while [[ $# -gt 0 ]]; do
         case "$1" in
@@ -74,10 +73,6 @@ if [[ "$COMMAND" != "run" ]]; then
                 ;;
             --full)
                 HEALTH_FULL=1
-                shift
-                ;;
-            --fix)
-                VERIFY_FIX=1
                 shift
                 ;;
             *)
@@ -103,7 +98,7 @@ Commands:
   stop  [--clean]              Graceful teardown (--clean wipes state dirs)
   ps                           Show component status
   health [--full]              Test LiteLLM and provider connectivity (--full tests all OpenRouter providers)
-  verify-models [--fix]        Verify all model IDs against live APIs (--fix removes "# verify" on pass)
+  verify-models                Verify all model IDs against live APIs
   env                          Print shell exports (use: eval \$(./stack.sh env))
   run <cmd...>                 Run a command with stack env loaded
 
@@ -498,6 +493,16 @@ cmd_start() {
         fi
     fi
 
+    # ── LiteLLM: verify all model IDs ────────────────────────────────────
+    log "Verifying model IDs against live APIs..."
+    if ! "${SCRIPT_DIR}/scripts/verify-models.sh"; then
+        echo ""
+        echo "ERROR: some model IDs failed verification." >&2
+        echo "Fix the model IDs in services/litellm/config/models.yaml" >&2
+        echo "then rebuild: python3 scripts/build_litellm_config.py" >&2
+        exit 1
+    fi
+
     # ── OpenShell: build CLI ────────────────────────────────────────────────
     log "Building OpenShell CLI (incremental)..."
     (
@@ -725,13 +730,7 @@ case "$COMMAND" in
     stop)   cmd_stop ;;
     ps)     cmd_ps ;;
     health) cmd_health ;;
-    verify-models)
-        if [[ "$VERIFY_FIX" -eq 1 ]]; then
-            exec "${SCRIPT_DIR}/scripts/verify-models.sh" --fix
-        else
-            exec "${SCRIPT_DIR}/scripts/verify-models.sh"
-        fi
-        ;;
+    verify-models) exec "${SCRIPT_DIR}/scripts/verify-models.sh" ;;
     env)    cmd_env ;;
     run)    cmd_run "$@" ;;
     help|--help|-h) cmd_help ;;
