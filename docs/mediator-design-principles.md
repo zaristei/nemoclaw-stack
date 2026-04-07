@@ -68,7 +68,7 @@ You don't need a custom observability stack. Standard Linux tools give you per-p
 
 Each policy class (and every process running under it) can be declaratively monitored for trifecta violations. The mediator computes the taint graph at policy-proposal time and serves it via a dashboard:
 
-**[Open the live interactive taint graph →](taint-graph.html)**
+**[Open the live interactive taint graph →](https://htmlpreview.github.io/?https://github.com/zaristei/nemoclaw-stack/blob/main/docs/taint-graph.html)**
 
 The graph below shows the honeypot deployment — 4 policies, scrubbed IPC channels, per-tag taint classification. Green = clean, yellow = partial (has source but no trifecta), red = violation. Solid edges = scrubbed IPC (de_taints). Dashed = raw.
 
