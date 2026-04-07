@@ -486,12 +486,18 @@ cmd_start() {
     export PATH="${CARGO_TARGET_DIR}/release:${PATH}"
 
     # ── OpenShell: build mediator + CLI + daemon ──────────────────────────
-    log "Building OpenShell mediator + mediator-cli + mediator-daemon (incremental)..."
+    log "Building OpenShell mediator (incremental)..."
     (
         cd "${OPENSHELL_DIR}"
         mise exec -- cargo build --release -p openshell-sandbox
-        mise exec -- cargo build --release -p openshell-sandbox --bin mediator-cli
-        mise exec -- cargo build --release -p openshell-sandbox --bin mediator-daemon
+    )
+    # Build mediator-cli and mediator-daemon separately (requires mediator-tools feature).
+    # These are uploaded to the sandbox, not baked into the cluster image.
+    log "Building mediator-cli + mediator-daemon..."
+    (
+        cd "${OPENSHELL_DIR}"
+        mise exec -- cargo build --release -p openshell-sandbox --features mediator-tools \
+            --bin mediator-cli --bin mediator-daemon
     )
 
     # ── Mediator env (embedded in sandbox process) ──────────────────────────
