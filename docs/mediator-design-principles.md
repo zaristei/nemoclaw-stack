@@ -6,102 +6,80 @@
 
 ---
 
-## The Problem
+## The Core Idea: Agents Should Design Their Own Security
 
-An AI agent with access to customer records, web browsing, and an external API is one prompt injection away from exfiltrating data. Today's defense is behavioral — the system prompt says "don't leak data." This fails when:
+Today, an operator defines a static network policy before the agent starts. The agent runs within those bounds or gets blocked. This works for known workflows but fails when the agent encounters something new — it hits a wall, the operator gets paged, manual intervention follows.
 
-1. The LLM is jailbroken via prompt injection (embedded in web pages, emails, user messages)
-2. The agent reasons itself into sharing data ("the user asked for it, so it must be okay")
-3. A multi-step chain combines innocent operations into a data leak (read file → summarize → send summary to untrusted endpoint)
+The mediator inverts this. **The agent proposes its own security policies at runtime.** It analyzes the task, determines what data and network access it needs, designs a policy that avoids the lethal trifecta, and submits it for approval. The operator reviews a structured security proposal, not a raw URL allowlist request. The agent operates autonomously within the approved bounds.
 
-System prompt guardrails are not a security boundary. They're suggestions to a statistical model.
+This is the difference between "the agent runs inside a predefined box" and "the agent designs the box, the operator validates the design, and the agent builds the box around itself."
 
-## The Thesis
+### Why This Matters
 
-**Structural enforcement beats behavioral enforcement.** Instead of telling the model not to leak data, make it physically impossible by ensuring the model never receives the raw data in the first place. The sensitive fields are `[REDACTED]` before they reach inference. A fully jailbroken LLM cannot output a customer's SSN if the string `291-38-4756` never appeared in its context window.
+An autonomous agent that can't acquire new capabilities is limited to what the operator anticipated. An agent that can propose policies adapts to novel tasks:
+
+- User asks the agent to research a new topic → agent proposes a fetcher policy with the relevant URLs
+- Agent discovers it needs access to a new database → proposes a reader policy with the appropriate mounts and scrubbers
+- Agent needs to parallelize work → proposes child policies with scoped access for each subtask
+- Agent hits a rate limit on one provider → proposes a v2 policy with a different endpoint
+
+The operator doesn't need to predict every possible task. They review and approve policy proposals as they arise. The approval is structural (reviewing a policy config + taint analysis) not behavioral (reviewing individual HTTP requests).
+
+### The Approval Model
+
+```
+Agent identifies need → policy_propose → taint analysis runs → operator reviews
+                                                                     ↓
+                                            Sees: policy config, trifecta warnings,
+                                            affected existing policies, scrubber gaps
+                                                                     ↓
+                                                            Approve / Deny
+                                                                     ↓
+                                            Agent forks children with approved policy
+                                            (no further approval needed per action)
+```
+
+**Approve once, run many.** The operator reviews the capability set and its security implications, then the agent operates autonomously within those bounds. This is analogous to reviewing app permissions at install time vs. prompting for every file access.
+
+### Immutability Enables Trust
+
+Policies are immutable. `research_scraper_v1` cannot be modified after approval. To change capabilities, the agent proposes `v2`. This gives the operator confidence that what they approved is what's running — there's no drift between the approved policy and the active policy.
+
+It also means the agent can reason about its own policy tree. It knows `v1` children have specific capabilities, `v2` children have different ones, and both can coexist. The audit trail is unambiguous.
 
 ## Why Syscalls
 
 We call them syscalls because the analogy is precise. In an operating system:
 
-- A process cannot directly access hardware. It makes a syscall, the kernel validates the request against the process's permissions, and either performs the operation or returns `EPERM`.
-- The process runs in userspace. The kernel runs in a privileged ring. The boundary is enforced by hardware (ring transitions, page tables), not by asking the process nicely.
+- A process cannot directly access hardware. It makes a syscall, the kernel validates against the process's permissions, and either performs the operation or returns `EPERM`.
+- The boundary is enforced by hardware (ring transitions, page tables), not by asking the process nicely.
 
 In the mediator:
 
-- An agent cannot directly access data, the network, or other agents. It makes a syscall over a Unix domain socket, the mediator validates the request against the caller's policy, and either performs the operation or returns an error.
-- The agent runs as a sandboxed process. The mediator runs as a privileged daemon. The boundary is enforced by UID isolation, iptables, filesystem permissions, and seccomp — not by the system prompt.
-
-The syscall metaphor communicates the correct mental model to both the agent (via the system prompt) and the developer (via the API). These are not optional suggestions. They are the only way to perform cross-boundary operations.
+- An agent cannot directly access data, the network, or other agents. It makes a syscall over a Unix domain socket, the mediator validates against the caller's policy, and either performs the operation or returns an error.
+- The boundary is enforced by UID isolation, iptables, filesystem permissions, and seccomp — not by the system prompt.
 
 ### The 11 Syscalls
 
 | Syscall | Kernel Analogy | Why It's Mediated |
 |---------|---------------|-------------------|
 | `http_request` | `connect()` + `send()` | Network egress is the primary exfiltration channel |
-| `policy_propose` | `exec()` with new capabilities | Capability acquisition must be human-approved |
-| `policy_list` | `ls /proc/` | Discovery of available capabilities |
-| `policy_get` | `cat /proc/pid/status` | Inspection before use |
-| `revoke_policy` | `kill -9` a capability set | Operator override, revocation propagates |
-| `fork_with_policy` | `fork()` + `setuid()` | Child processes get scoped UIDs, GIDs, iptables |
-| `signal` | `kill()` | Process lifecycle management |
+| `policy_propose` | `exec()` with new capabilities | The agent designs its own security policies |
+| `policy_list` | `ls /proc/` | Discovery — check what's available before proposing |
+| `policy_get` | `cat /proc/pid/status` | Inspect a policy's scrubbers and allowlists before forking |
+| `revoke_policy` | `kill -9` a capability set | Operator override, revocation propagates to all children |
+| `fork_with_policy` | `fork()` + `setuid()` | Child gets its own UID, GID, iptables, Landlock |
+| `signal` | `kill()` | Lifecycle management (term, kill, stop, cont) |
 | `request_port` | `bind()` | Inbound traffic is an untrusted input channel |
 | `ipc_send` | `write()` to a pipe | Cross-process data flow with scrubbing |
 | `ipc_connect` | `socketpair()` | Bidirectional streams with policy enforcement |
 | `ps` | `readdir(/proc/)` | Scoped discovery (only see what your policy allows) |
 
+The policy CRUD syscalls (`propose`, `list`, `get`, `revoke`) are the distinctive ones. They don't exist in a traditional OS because processes don't design their own permissions. Here, the agent is expected to — that's the point.
+
 ### What Doesn't Need a Syscall
 
-File I/O within a workflow's own mounts. Once `fork_with_policy` provisions the filesystem via Landlock + POSIX ACLs, the workflow operates at native speed. We tried mediating file access (`access_external_mount` was in early designs) and removed it — the overhead was prohibitive and the security comes from the provisioning, not per-operation checks.
-
-## Policy Lifecycle
-
-### Immutability
-
-Policies are immutable. Once `research_scraper_v1` is approved, it cannot be modified. To change capabilities, the agent proposes `research_scraper_v2`. This eliminates:
-
-- Mid-flight mutation bugs (children on v1 don't suddenly get v2's permissions)
-- Ambiguous audit trails ("what policy was active when this data was accessed?")
-- Race conditions between policy updates and running workflows
-
-The version is in the name, not in metadata. `v1` and `v2` are different policies that can coexist. Old workflows keep running on old policies.
-
-### Control Flow
-
-```
-Agent identifies a capability gap
-  ↓
-policy_list → check if an existing policy covers the need
-  ↓
-policy_get → inspect the candidate's allowlists and scrubbers
-  ↓
-If suitable: fork_with_policy → child starts immediately (no approval needed)
-If not: policy_propose → mediator runs taint analysis
-  ↓
-Taint analysis: per-data-type-tag, checks source/untrusted/sink
-  ↓
-Results sent to approval bridge → operator sees:
-  - The proposed policy config
-  - Taint warnings (if any trifecta violations)
-  - Which existing policies would be affected
-  ↓
-Operator approves or denies (Telegram inline button)
-  ↓
-If approved: policy stored, agent can now fork children with it
-If denied: agent gets an error, must redesign
-```
-
-The key insight: **approval happens once per policy, not once per action.** The operator reviews the capability set and the taint analysis, then the agent operates autonomously within those bounds. This is analogous to installing an app (review permissions once) vs. prompting for every file access.
-
-### The Proactive vs. Reactive Loop
-
-The agent guide teaches two modes:
-
-**Proactive:** The agent analyzes the task, identifies what policies it needs, proposes them upfront, waits for approval, then executes. Fewer round-trips, smoother UX.
-
-**Reactive:** The agent tries an operation, gets denied, interprets the error, acquires the capability, retries. Works when the agent can't predict everything upfront.
-
-In practice, both modes combine. The agent plans proactively for the main workflow and handles surprises reactively.
+File I/O within a workflow's own mounts. Once `fork_with_policy` provisions the filesystem via Landlock + POSIX ACLs, the workflow operates at native speed. We tried mediating file access and removed it — the overhead was prohibitive and the security comes from provisioning, not per-operation checks.
 
 ## The Lethal Trifecta
 
@@ -109,105 +87,103 @@ In practice, both modes combine. The agent plans proactively for the main workfl
 
 A policy violates the lethal trifecta if, for the same data-type tag T, it simultaneously has:
 
-1. **Source(T):** Can access sensitive data of type T (via mounts, unscrubbed IPC from a partner with source, or filesystem edge from a clean writer)
-2. **Untrusted input(T):** Can receive attacker-controlled content tagged T (via HTTP to untrusted sources, `bind_ports`, or unscrubbed IPC from a partner with untrusted input)
-3. **Sink(T):** Can exfiltrate data of type T (via HTTP to endpoints not in `trusted_external` for T, or unscrubbed IPC to a partner with sink)
+1. **Source(T):** Access to sensitive data of type T
+2. **Untrusted input(T):** Receives attacker-controlled content tagged T
+3. **Sink(T):** Can send data to an endpoint not trusted for type T
 
 ### Why Per-Tag
 
-A policy that has `source(pii)` and `sink(credentials)` is NOT a trifecta violation. The PII can't leak through the credentials sink because they're different data types. The analysis tracks each tag independently: pii, credentials, financial, web_content, internal, etc.
+A policy with `source(pii)` and `sink(credentials)` is NOT a violation. The PII can't leak through the credentials sink — they're different data types. The analysis tracks each tag independently.
 
-This prevents false positives. A logging endpoint trusted for PII doesn't need to be trusted for web_content. An untrusted web source tagged `web_content` doesn't contaminate a policy that only handles `credentials`.
+### The Guarantee
 
-### Guarantees
+**If the taint analysis reports no trifecta, then:** For every data-type tag T, there is no policy-level execution path where data of type T flows from a sensitive source, through a process handling untrusted content of type T, to an untrusted external endpoint for type T.
 
-**If the taint analysis reports no trifecta, then:**
-
-For every data-type tag T, there is no execution path where data classified as T can flow from a sensitive source, through a process that also handles untrusted content of type T, to an untrusted external endpoint for type T.
-
-**What breaks this guarantee:**
-
-1. The trust spec is wrong (a path is classified as non-sensitive when it actually contains PII)
-2. A scrubber is bypassed (the scrubber claims `de_taints: true` but doesn't actually remove the data)
-3. A side channel exists (timing, existence queries, error messages that reveal data)
-4. The data is exfiltrated through a channel the mediator doesn't control (e.g., a binary exploit that bypasses seccomp)
-
-The guarantee is against the **policy-level data flow**, not against all possible attacks. It's defense-in-depth, not a proof of security.
+**What this doesn't cover:** Side channels, scrubber bugs, trust spec misclassification, binary exploits. The guarantee is against policy-level data flow, not all possible attacks.
 
 ### Implicit Sensitivity
 
-Data written to disk by a process with no untrusted input is presumed sensitive. The reasoning: if a process only handles trusted data (user conversations, database queries, internal computation), everything it writes is derived from trusted sources. Any other process reading those files inherits the sensitivity.
+Data written by a process with no untrusted input is presumed sensitive. A clean process only handles trusted data — everything it writes is derived from trusted sources. This eliminates manual workspace tagging. The classification is derived from the writer's policy profile.
 
-Conversely, data written by a process with untrusted input (web fetcher, webhook listener) is considered contaminated. Readers of that data get `untrusted_input`, not `source`.
+### How Dynamic Policy Creation Interacts With Trifecta
 
-This eliminates the need to manually tag workspace paths. The classification is derived from the writer's policy profile.
+When the agent proposes a policy, the taint analysis runs **before** the operator sees it. The proposal includes:
+
+- The policy config
+- Per-tag taint classification (source/untrusted/sink for each data type)
+- Whether any tag has all three legs (trifecta violation)
+- Which **existing** policies would be affected (their taint worsens if this policy is approved)
+- Pre-computed compromised resources that would be materialized at fork time
+
+The agent can propose a trifecta-violating policy. The operator will see a big red warning. They can approve it anyway (informed risk) or deny it (agent must redesign).
+
+The agent guide teaches the agent to **avoid trifecta proactively** by decomposing work:
+
+```
+BAD:  one policy with sensitive data + untrusted HTTP + external sink
+GOOD: reader policy (data, scrubbed IPC out) + fetcher policy (HTTP, no data)
+```
+
+The agent learns to design safe policies the same way a developer learns to write secure code — by understanding the principles and applying them. The difference is the taint analysis catches mistakes at proposal time, not at breach time.
 
 ## Scrubbers as Taint Transformers
 
-Scrubbers sit on IPC channels and transform data flowing between policies. They serve two roles:
+Scrubbers sit on IPC channels between policies. They come in two flavors:
 
-### 1. Data Protection (PII scrubbing)
+**Taint transformers** (`de_taints: true`): `regex_pii`, `field_pii`, `ner_pii`, `schema_enforcer`. These change the data's classification — after scrubbing, the data is no longer `source(T)` for the specified tags. This is how IPC channels cross trust boundaries without creating trifecta.
 
-`regex_pii`, `field_pii`, and `ner_pii` remove personally identifiable information from messages before they cross a trust boundary. The receiving policy sees `[REDACTED]` where the SSN was.
+**Defense layers** (`de_taints: false`): `instruction_strip`, `delimiter`, `canary`. These reduce injection risk without changing classification. A heuristic regex can't catch all injection phrasings, so the taint analysis doesn't trust them to break the chain.
 
-These scrubbers set `de_taints: true`, which tells the taint analysis: "after this scrubber, the data is no longer considered source(T) for the specified tags." This is how IPC channels can cross trust boundaries without creating a trifecta.
+The agent specifies scrubbers per-IPC-target in its policy proposal:
 
-### 2. Injection Defense (content scrubbing)
-
-`instruction_strip`, `delimiter`, and `canary` defend against prompt injection in untrusted content. They do NOT set `de_taints: true` — they're defense-in-depth, not guarantees. A heuristic regex cannot catch all injection phrasings.
-
-The design philosophy: PII scrubbers are **taint transformers** (they change the data's classification). Injection scrubbers are **defense layers** (they reduce risk without changing classification).
-
-### 3. Structural Enforcement (schema)
-
-`schema_enforcer` rejects messages that don't conform to a declared JSON schema. This constrains the attack surface — the receiving policy only accepts data in the expected shape.
-
-## Init: The Coordinator Pattern
-
-Init is the root process. In earlier designs, init had wildcard permissions (HTTP, IPC, mounts, ports). This made it a permanent trifecta violation.
-
-The current design: init has **no HTTP access** except the inference endpoint. No sensitive mounts. No bind_ports. It coordinates by forking children with scoped policies and communicating via IPC. Results come back scrubbed.
-
-```
-Init (no data access, inference only)
-  ├─ fork: customer_reader_v1 (mounts /data/customers, scrubbed IPC out)
-  ├─ fork: email_reader_v1 (mounts /data/email, scrubbed IPC out)
-  └─ fork: financial_monitor_v1 (mounts /data/financial, scrubbed IPC out)
+```yaml
+allowed_ipc_targets:
+  - policy_name: "processor_*"
+    scrub_egress:
+      scrubber: field_pii
+      data_types: [pii]
+      de_taints: true
+      config:
+        fields: ["$.email", "$.ssn", "$.phone"]
+        action: redact
 ```
 
-Init reasons about scrubbed data. It can say "Sarah Chen has a balance of $84,230" but it cannot say "her SSN is 291-38-4756" because that string was `[REDACTED]` before it reached inference.
+This means: "I want to talk to processor policies, and when I send data, scrub these PII fields first." The operator sees this in the proposal and can verify the scrubber coverage matches the data sensitivity.
 
-The inference endpoint is classified as `trusted_external` for all data types because init uses a key scoped to sensitive-tier models (zero-data-retention providers only).
+## The Init Coordinator Pattern
 
-## Separation of Concerns
+Init is the root agent process. In earlier designs it had wildcard permissions — HTTP, IPC, mounts, everything. This made it a permanent trifecta violation.
 
-The golden rule: **never combine all three trifecta legs in one policy.** The agent guide teaches decomposition patterns:
+Current design: init has **no HTTP except the inference endpoint**, no sensitive mounts, no bind_ports. It coordinates by forking children with scoped policies. Results come back scrubbed.
 
-**Reader → Processor → Sender:** The reader has source, the sender has sink, the processor has neither. Scrubbers on the IPC channels between them strip PII.
+This means the LLM — the most attackable component (prompt injection, jailbreaks) — never touches raw PII. It reasons about `[REDACTED]` data. Even a fully compromised model can't leak what it never received.
 
-**Fetcher → Analyzer:** The fetcher has untrusted input + sink but no source. The analyzer has source but no untrusted input (content is delimited/stripped on ingress) and no untrusted sink.
+The inference endpoint is classified as trusted because init uses a key scoped to zero-data-retention providers. The trust classification of the inference URL is what closes the sink leg.
 
-These patterns are not unique to our system — they're the principle of least privilege applied to data flow, not just capability. The mediator makes the principle enforceable rather than advisory.
+## What This Enables
 
-## What This Enables for NemoClaw
+### Self-Organizing Agent Workflows
 
-### Multi-Agent Task Decomposition
+The agent doesn't need a predefined workflow. It receives a task, analyzes what capabilities it needs, proposes policies, and builds the workflow at runtime. A "research quantum computing" task becomes:
 
-An agent that needs to "research quantum computing using web sources and cross-reference against our internal knowledge base" can decompose this into:
+1. Agent proposes `fetcher_v1` (arxiv HTTP, scrubbed IPC to coordinator)
+2. Agent proposes `kb_reader_v1` (internal KB mount, scrubbed IPC)
+3. Operator approves both (taint analysis: no trifecta)
+4. Agent forks both, coordinates via IPC, collects scrubbed results
 
-- A web fetcher (untrusted HTTP, no sensitive data)
-- A KB reader (sensitive data, no untrusted HTTP)
-- A coordinator (inference only, scrubbed results from both)
+Next time the agent gets a similar task, the policies already exist. `policy_list` shows them, `policy_get` confirms they fit, `fork_with_policy` creates children immediately — no approval round-trip.
 
-Each child is a separate UID with its own iptables rules, Landlock profile, and IPC scrubbers. The decomposition happens at the agent's initiative — the agent proposes the policies, the operator approves once, and the agent forks the children autonomously.
+### Blueprint Policy Presets
 
-### Blueprint-Level Policy Presets
+Common patterns can be pre-approved in the NemoClaw blueprint. A "research assistant" blueprint ships with reader, fetcher, and coordinator policies. The agent forks them without waiting. The operator approved the blueprint once.
 
-Common decomposition patterns can be pre-approved in the NemoClaw blueprint. A "research assistant" blueprint ships with reader, fetcher, and coordinator policies already approved. The agent forks them without waiting for operator approval.
+### Graduated Autonomy
 
-### Cross-Sandbox Communication (future)
+New agents start with no pre-approved policies. Every capability requires operator approval. As trust builds, the operator pre-approves more policies in the blueprint. Eventually the agent operates fully autonomously within a rich policy set, only proposing new policies for genuinely novel tasks.
 
-The same policy/IPC/scrubber model extends to cross-sandbox communication. Two NemoClaw instances in separate sandboxes could communicate via a gateway-mediated IPC channel with the same mutual consent and scrubbing semantics.
+### Cross-Sandbox Communication (Future)
+
+The same policy/IPC/scrubber model extends to cross-sandbox channels. Two NemoClaw instances could communicate via gateway-mediated IPC with mutual consent and scrubbing — the same semantics, different transport.
 
 ## Implementation Status
 
@@ -217,14 +193,10 @@ The same policy/IPC/scrubber model extends to cross-sandbox communication. Two N
 | Per-tag taint analysis | Complete | 10 trifecta e2e |
 | 8 scrubber types | Complete | 27 unit |
 | Implicit sensitivity | Complete | 3 unit |
-| mediator-daemon binary | Complete | Deployed to sandbox |
-| mediator-cli binary | Complete | Deployed to sandbox |
+| mediator-daemon + mediator-cli | Complete | Deployed to sandbox |
 | NemoClaw entrypoint hook | Complete | Backward compatible |
-| Trust spec loading | Complete | YAML config |
-| Compromise materialization | Complete | Fork-time bulk insert |
-| Taint dashboard (vis.js) | Complete | HTTP server |
 | Agent syscall guide | Complete | 467 lines |
 | Doc workflow e2e tests | Complete | 5 scenarios |
-| Full-stack e2e test | Complete | All workflows in one |
-| WhatsApp honeypot | Complete | Live red team testing |
+| Full-stack e2e test | Complete | 1 lifecycle test |
+| WhatsApp honeypot | Complete | Live red team |
 | **Total tests** | **167** | All passing |
