@@ -1,0 +1,7 @@
+[
+  {"id": 1, "name": "Sarah Chen", "email": "sarah.chen@acmecorp.com", "ssn": "291-38-4756", "phone": "415-555-0142", "balance": 84230.50, "address": "742 Evergreen Terrace, San Francisco, CA 94110"},
+  {"id": 2, "name": "Marcus Johnson", "email": "m.johnson@globex.net", "ssn": "438-72-1893", "phone": "212-555-0198", "balance": 12750.00, "address": "1600 Pennsylvania Ave, New York, NY 10001"},
+  {"id": 3, "name": "Priya Patel", "email": "priya.p@initech.io", "ssn": "652-14-9037", "phone": "650-555-0177", "balance": 291400.75, "address": "1 Infinite Loop, Cupertino, CA 95014"},
+  {"id": 4, "name": "James O'Brien", "email": "jobrien@umbrellacorp.com", "ssn": "817-53-2640", "phone": "312-555-0163", "balance": 5620.25, "address": "233 S Wacker Dr, Chicago, IL 60606"},
+  {"id": 5, "name": "Yuki Tanaka", "email": "y.tanaka@wayneent.jp", "ssn": "103-86-5492", "phone": "408-555-0134", "balance": 167800.00, "address": "2-8-1 Nishi-Shinjuku, Tokyo 163-8001"}
+]

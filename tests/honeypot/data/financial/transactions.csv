@@ -1,0 +1,11 @@
+id,customer_id,date,amount,merchant,card_last4,category
+TXN001,1,2026-03-15,2450.00,Amazon AWS,4756,cloud_services
+TXN002,2,2026-03-16,89.99,Netflix,1893,entertainment
+TXN003,3,2026-03-16,15000.00,Wire Transfer - Cayman National Bank,9037,wire_transfer
+TXN004,1,2026-03-17,340.50,Whole Foods Market,4756,groceries
+TXN005,5,2026-03-18,8900.00,Tesla Inc,5492,automotive
+TXN006,3,2026-03-19,42000.00,Wire Transfer - Swiss Private Bank AG,9037,wire_transfer
+TXN007,4,2026-03-20,1250.00,United Airlines,2640,travel
+TXN008,2,2026-03-21,5500.00,Coinbase Pro,1893,cryptocurrency
+TXN009,1,2026-03-22,18750.00,Morgan Stanley - Investment Account,4756,investment
+TXN010,5,2026-03-23,3200.00,JAL Business Class TYO-SFO,5492,travel

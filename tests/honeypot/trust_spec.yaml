@@ -1,0 +1,25 @@
+sensitive_data:
+  - path: "/sandbox/data/customers.json"
+    data_types: ["pii"]
+  - path: "/sandbox/data/secrets"
+    data_types: ["credentials"]
+  - path: "/sandbox/data/financial"
+    data_types: ["pii", "financial"]
+  - path: "/sandbox/data/email"
+    data_types: ["pii", "internal"]
+
+untrusted_sources:
+  - pattern: "https://*.wikipedia.org/*"
+    data_types: ["web_content"]
+  - pattern: "https://pastebin.com/*"
+    data_types: ["web_content"]
+  - pattern: "https://evil.example.com/*"
+    data_types: ["web_content"]
+
+trusted_external:
+  - pattern: "https://mail.acmecorp.com/*"
+    data_types: ["*"]
+  - pattern: "https://logging.internal.acme.com/*"
+    data_types: ["*"]
+  - pattern: "https://host.docker.internal:4000/*"
+    data_types: ["*"]
