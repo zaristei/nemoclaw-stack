@@ -3,155 +3,196 @@
 <head>
 <meta charset="utf-8">
 <title>Taint Graph — Honeypot Deployment</title>
-<script src="https://unpkg.com/vis-network/standalone/umd/vis-network.min.js"></script>
 <style>
-  body { font-family: system-ui, sans-serif; margin: 0; background: #0d1117; color: #c9d1d9; }
-  #header { padding: 12px 20px; background: #161b22; border-bottom: 1px solid #30363d; }
-  #header h2 { margin: 0; font-size: 16px; font-weight: 500; }
-  #header p { margin: 4px 0 0; font-size: 12px; color: #8b949e; }
-  #container { display: flex; height: calc(100vh - 70px); }
-  #graph { flex: 1; }
-  #detail { width: 340px; padding: 16px; overflow-y: auto; border-left: 1px solid #30363d; background: #161b22; font-size: 13px; }
-  #detail h3 { margin-top: 0; }
-  .tag-clean { color: #3fb950; }
-  .tag-partial { color: #d29922; }
-  .tag-trifecta { color: #f85149; }
-  pre { background: #0d1117; padding: 8px; border-radius: 4px; overflow-x: auto; font-size: 11px; white-space: pre-wrap; }
-  .legend { font-size: 11px; color: #8b949e; margin-top: 12px; padding-top: 12px; border-top: 1px solid #30363d; }
-  .legend span { display: inline-block; width: 10px; height: 10px; border-radius: 2px; margin-right: 4px; vertical-align: middle; }
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body { font-family: system-ui, -apple-system, sans-serif; background: #0d1117; color: #c9d1d9; }
+  #header { padding: 16px 24px; background: #161b22; border-bottom: 1px solid #30363d; }
+  #header h2 { font-size: 18px; font-weight: 600; }
+  #header p { font-size: 12px; color: #8b949e; margin-top: 4px; }
+  #main { display: flex; height: calc(100vh - 65px); }
+  #graph { flex: 1; display: flex; align-items: center; justify-content: center; }
+  #detail { width: 360px; padding: 20px; overflow-y: auto; border-left: 1px solid #30363d; background: #161b22; font-size: 13px; line-height: 1.6; }
+  #detail h3 { margin: 0 0 8px; font-size: 16px; }
+  #detail h4 { margin: 16px 0 4px; font-size: 13px; color: #8b949e; text-transform: uppercase; letter-spacing: 0.05em; }
+  .clean { color: #3fb950; }
+  .partial { color: #d29922; }
+  .trifecta { color: #f85149; }
+  pre { background: #0d1117; padding: 8px 10px; border-radius: 4px; font-size: 11px; overflow-x: auto; margin: 4px 0 8px; border: 1px solid #30363d; }
+  .legend { font-size: 11px; color: #8b949e; margin-top: 16px; padding-top: 16px; border-top: 1px solid #30363d; }
+  .legend div { margin: 4px 0; }
+  .legend span { display: inline-block; width: 10px; height: 10px; border-radius: 2px; margin-right: 6px; vertical-align: middle; }
+
+  /* SVG graph */
+  svg { width: 100%; max-width: 700px; }
+  .node { cursor: pointer; }
+  .node rect { rx: 8; ry: 8; stroke-width: 2; }
+  .node text { font-family: system-ui; font-size: 12px; fill: #c9d1d9; }
+  .node .subtitle { font-size: 10px; fill: #8b949e; }
+  .node:hover rect { filter: brightness(1.2); }
+  .edge line { stroke-width: 1.5; }
+  .edge text { font-size: 9px; fill: #8b949e; font-family: system-ui; }
+  .edge .scrubber-label { font-size: 9px; fill: #3fb950; }
 </style>
 </head>
 <body>
 <div id="header">
   <h2>Mediator Taint Graph — Honeypot Deployment</h2>
-  <p>4 policies | 4 active workflows | Trust spec: pii, credentials, financial, internal, web_content</p>
+  <p>4 policies &middot; 4 active workflows &middot; 0 trifecta violations &middot; trust spec: pii, credentials, financial, internal, web_content</p>
 </div>
-<div id="container">
-  <div id="graph"></div>
+<div id="main">
+  <div id="graph">
+    <svg viewBox="0 0 680 420">
+      <defs>
+        <marker id="arrow-green" viewBox="0 0 10 7" refX="10" refY="3.5" markerWidth="8" markerHeight="6" orient="auto">
+          <polygon points="0 0, 10 3.5, 0 7" fill="#3fb950"/>
+        </marker>
+      </defs>
+
+      <!-- Edges (IPC channels — all scrubbed) -->
+      <g class="edge">
+        <line x1="310" y1="70" x2="410" y2="210" stroke="#3fb950" marker-end="url(#arrow-green)"/>
+        <text x="330" y="130" class="scrubber-label">field_pii</text>
+        <text x="330" y="142" class="subtitle">$.email $.ssn $.phone $.address</text>
+      </g>
+      <g class="edge">
+        <line x1="310" y1="210" x2="410" y2="210" stroke="#3fb950" marker-end="url(#arrow-green)"/>
+        <text x="335" y="200" class="scrubber-label">field_pii</text>
+        <text x="335" y="212" class="subtitle">$.from $.to $.body</text>
+      </g>
+      <g class="edge">
+        <line x1="310" y1="350" x2="410" y2="210" stroke="#3fb950" marker-end="url(#arrow-green)"/>
+        <text x="330" y="300" class="scrubber-label">regex_pii</text>
+        <text x="330" y="312" class="subtitle">SSN, email, phone, CC</text>
+      </g>
+
+      <!-- Init node (green — no legs) -->
+      <g class="node" onclick="showDetail('init_v0')">
+        <rect x="410" y="170" width="220" height="80" fill="#161b22" stroke="#3fb950"/>
+        <text x="520" y="198" text-anchor="middle" font-weight="600">init_v0</text>
+        <text x="520" y="216" text-anchor="middle" class="subtitle">coordinator &middot; no data access</text>
+        <text x="520" y="232" text-anchor="middle" class="subtitle" fill="#3fb950">&#10003; 0 legs &middot; clean</text>
+      </g>
+
+      <!-- Customer reader (yellow — source only) -->
+      <g class="node" onclick="showDetail('customer_reader_v1')">
+        <rect x="40" y="40" width="270" height="60" fill="#161b22" stroke="#d29922"/>
+        <text x="175" y="66" text-anchor="middle" font-weight="600">customer_reader_v1</text>
+        <text x="175" y="82" text-anchor="middle" class="subtitle">source(pii) &middot; 1 leg &middot; /data/customers.json</text>
+      </g>
+
+      <!-- Email reader (yellow — source only) -->
+      <g class="node" onclick="showDetail('email_reader_v1')">
+        <rect x="40" y="180" width="270" height="60" fill="#161b22" stroke="#d29922"/>
+        <text x="175" y="206" text-anchor="middle" font-weight="600">email_reader_v1</text>
+        <text x="175" y="222" text-anchor="middle" class="subtitle">source(pii, internal) &middot; 1 leg &middot; /data/email</text>
+      </g>
+
+      <!-- Financial monitor (yellow — source only) -->
+      <g class="node" onclick="showDetail('financial_monitor_v1')">
+        <rect x="40" y="320" width="270" height="60" fill="#161b22" stroke="#d29922"/>
+        <text x="175" y="346" text-anchor="middle" font-weight="600">financial_monitor_v1</text>
+        <text x="175" y="362" text-anchor="middle" class="subtitle">source(pii, financial) &middot; 1 leg &middot; /data/financial</text>
+      </g>
+    </svg>
+  </div>
   <div id="detail">
-    <h3>Policy Taint Dashboard</h3>
-    <p>Click a node to see its per-tag taint classification and IPC scrubber config.</p>
+    <h3>Taint Dashboard</h3>
+    <p>Click a policy node to see its full taint classification, mounts, IPC scrubbers, and per-tag breakdown.</p>
+
     <div class="legend">
-      <p><span style="background:#3fb950"></span> Clean — 0-1 trifecta legs. Safe.</p>
-      <p><span style="background:#d29922"></span> Partial — 2 legs. One more = violation.</p>
-      <p><span style="background:#f85149"></span> Trifecta — all 3 legs for same data type.</p>
-      <p>Solid edge = scrubbed IPC (de_taints). Dashed = raw.</p>
+      <div><span style="background:#3fb950"></span> <b>Green</b> — 0-1 trifecta legs. No violation possible.</div>
+      <div><span style="background:#d29922"></span> <b>Yellow</b> — has source but no untrusted input or sink.</div>
+      <div><span style="background:#f85149"></span> <b>Red</b> — all 3 legs present for the same data type.</div>
+      <div style="margin-top:8px"><b>Solid green edge</b> = scrubbed IPC with <code>de_taints: true</code></div>
+      <div><b>Dashed gray edge</b> = raw IPC (no scrubber)</div>
     </div>
   </div>
 </div>
 <script>
-// Baked-in graph data from the live honeypot deployment
-const policies = [
-  {
+const policies = {
+  init_v0: {
     name: "init_v0",
-    color: "#3fb950",
-    trifecta: false,
-    tags: {pii: {src:false, untrust:false, sink:false}, credentials: {src:false, untrust:false, sink:false}},
-    mounts: [],
-    http: [],
-    ipc_targets: ["*"],
-    rationale: "Root coordinator — inference only. No data access, no untrusted HTTP.",
-    workflows: 0,
+    status: "clean",
+    rationale: "Root coordinator — inference only via sensitive-tier LiteLLM. No data access. No untrusted HTTP. No bind_ports.",
+    legs: "0 legs — structurally impossible to trifecta",
+    mounts: "None",
+    http: "None (inference via proxy only)",
+    ipc: "Wildcard — can coordinate any child",
+    scrub_egress: "N/A (init sends tasks, not data)",
+    tags: [
+      {name: "pii", src: false, untrust: false, sink: false},
+      {name: "credentials", src: false, untrust: false, sink: false},
+      {name: "financial", src: false, untrust: false, sink: false},
+    ],
+    workflows: "0 (init is the agent process itself)",
   },
-  {
+  customer_reader_v1: {
     name: "customer_reader_v1",
-    color: "#d29922",
-    trifecta: false,
-    tags: {pii: {src:true, untrust:false, sink:false}},
-    mounts: ["/sandbox/data/customers.json (r)"],
-    http: [],
-    ipc_targets: ["init_v0"],
-    scrub_egress: "field_pii ($.email, $.ssn, $.phone, $.address → [REDACTED])",
-    rationale: "Reads customer records. PII scrubbed on egress.",
-    workflows: 1,
+    status: "partial",
+    rationale: "Reads customer records. All PII fields scrubbed on IPC egress to init.",
+    legs: "1 leg — source(pii). Missing untrusted input + sink.",
+    mounts: "/sandbox/data/customers.json (r)",
+    http: "None",
+    ipc: "init_v0 only",
+    scrub_egress: "field_pii: $.email, $.ssn, $.phone, $.address → [REDACTED]\nde_taints: true (breaks taint chain)",
+    tags: [
+      {name: "pii", src: true, untrust: false, sink: false},
+    ],
+    workflows: "1 (wf_customer)",
   },
-  {
+  email_reader_v1: {
     name: "email_reader_v1",
-    color: "#d29922",
-    trifecta: false,
-    tags: {pii: {src:true, untrust:false, sink:false}, internal: {src:true, untrust:false, sink:false}},
-    mounts: ["/sandbox/data/email (r)"],
-    http: [],
-    ipc_targets: ["init_v0"],
-    scrub_egress: "field_pii ($.from, $.to, $.body → [REDACTED])",
-    rationale: "Reads email inbox. Injection stripped, PII scrubbed on egress.",
-    workflows: 2,
+    status: "partial",
+    rationale: "Reads email inbox. Injection stripped from content. PII scrubbed on egress.",
+    legs: "1 leg — source(pii, internal). Missing untrusted input + sink.",
+    mounts: "/sandbox/data/email (r)",
+    http: "None",
+    ipc: "init_v0 only",
+    scrub_egress: "field_pii: $.from, $.to, $.body → [REDACTED]\nde_taints: true",
+    tags: [
+      {name: "pii", src: true, untrust: false, sink: false},
+      {name: "internal", src: true, untrust: false, sink: false},
+    ],
+    workflows: "2 (wf_email, wf_email_reader)",
   },
-  {
+  financial_monitor_v1: {
     name: "financial_monitor_v1",
-    color: "#d29922",
-    trifecta: false,
-    tags: {pii: {src:true, untrust:false, sink:false}, financial: {src:true, untrust:false, sink:false}},
-    mounts: ["/sandbox/data/financial (r)"],
-    http: [],
-    ipc_targets: ["init_v0"],
-    scrub_egress: "regex_pii (SSN, email, phone, CC → [REDACTED])",
-    rationale: "Monitors transactions. PII scrubbed on egress.",
-    workflows: 1,
+    status: "partial",
+    rationale: "Monitors financial transactions for anomalies. No external access.",
+    legs: "1 leg — source(pii, financial). Missing untrusted input + sink.",
+    mounts: "/sandbox/data/financial (r)",
+    http: "None",
+    ipc: "init_v0 only",
+    scrub_egress: "regex_pii: SSN, email, phone, credit card → [REDACTED]\nde_taints: true",
+    tags: [
+      {name: "pii", src: true, untrust: false, sink: false},
+      {name: "financial", src: true, untrust: false, sink: false},
+    ],
+    workflows: "1 (wf_finance)",
   },
-];
+};
 
-const container = document.getElementById('graph');
-
-const nodes = policies.map(p => ({
-  id: p.name,
-  label: p.name + (p.workflows > 0 ? ` (${p.workflows})` : ''),
-  color: { background: p.color, border: '#30363d', highlight: { background: p.color, border: '#c9d1d9' } },
-  font: { color: '#c9d1d9', size: 14 },
-  shape: 'box',
-  borderWidth: 2,
-  margin: 12,
-}));
-
-const edges = [];
-policies.forEach(p => {
-  if (p.ipc_targets) {
-    p.ipc_targets.forEach(target => {
-      const matches = policies.filter(t => {
-        if (target === '*') return t.name !== p.name;
-        return t.name === target || t.name.startsWith(target.replace('*',''));
-      });
-      matches.forEach(t => {
-        edges.push({
-          from: p.name, to: t.name,
-          arrows: 'to',
-          color: { color: p.scrub_egress ? '#3fb950' : '#8b949e' },
-          dashes: !p.scrub_egress,
-          width: p.scrub_egress ? 2 : 1,
-          title: p.scrub_egress || 'raw (no scrubber)',
-        });
-      });
-    });
-  }
-});
-
-const network = new vis.Network(container, { nodes, edges }, {
-  physics: { solver: 'forceAtlas2Based', forceAtlas2Based: { gravitationalConstant: -100 } },
-  layout: { improvedLayout: true },
-  interaction: { hover: true },
-});
-
-network.on('click', params => {
-  if (!params.nodes.length) return;
-  const name = params.nodes[0];
-  const p = policies.find(x => x.name === name);
-  if (!p) return;
+function showDetail(name) {
+  const p = policies[name];
   const detail = document.getElementById('detail');
-  let html = `<h3>${name}</h3>`;
-  html += `<p style="color:${p.color}">${p.trifecta ? '⚠ TRIFECTA' : '✓ Clean'}</p>`;
+  const statusClass = p.status === 'clean' ? 'clean' : p.status === 'partial' ? 'partial' : 'trifecta';
+  let html = `<h3>${p.name}</h3>`;
+  html += `<p class="${statusClass}">${p.status === 'clean' ? '✓ Clean' : p.status === 'partial' ? '◐ Partial' : '⚠ TRIFECTA'} — ${p.legs}</p>`;
   html += `<p>${p.rationale}</p>`;
-  html += `<p><b>Workflows:</b> ${p.workflows} | <b>Mounts:</b> ${p.mounts.length}</p>`;
-  if (p.mounts.length) html += `<pre>${p.mounts.join('\n')}</pre>`;
-  if (p.http.length) html += `<p><b>HTTP:</b></p><pre>${p.http.join('\n')}</pre>`;
-  if (p.scrub_egress) html += `<p><b>IPC egress scrubber:</b></p><pre>${p.scrub_egress}</pre>`;
-  html += `<p><b>Per-tag taint:</b></p>`;
-  Object.entries(p.tags).forEach(([tag, t]) => {
+  html += `<h4>Mounts</h4><pre>${p.mounts}</pre>`;
+  html += `<h4>HTTP Allowlist</h4><pre>${p.http}</pre>`;
+  html += `<h4>IPC Targets</h4><pre>${p.ipc}</pre>`;
+  html += `<h4>Egress Scrubber</h4><pre>${p.scrub_egress}</pre>`;
+  html += `<h4>Workflows</h4><pre>${p.workflows}</pre>`;
+  html += `<h4>Per-Tag Taint</h4>`;
+  p.tags.forEach(t => {
     const legs = [t.src && 'source', t.untrust && 'untrusted', t.sink && 'sink'].filter(Boolean);
-    const cls = legs.length >= 3 ? 'tag-trifecta' : legs.length >= 1 ? 'tag-partial' : 'tag-clean';
-    html += `<p class="${cls}"><b>${tag}:</b> ${legs.length ? legs.join(' + ') : 'clean'}</p>`;
+    const cls = legs.length >= 3 ? 'trifecta' : legs.length >= 1 ? 'partial' : 'clean';
+    html += `<div class="${cls}"><b>${t.name}:</b> ${legs.length ? legs.join(' + ') : 'clean'}</div>`;
   });
+  html += `<div class="legend"><div><span style="background:#3fb950"></span> <b>Green</b> — clean</div><div><span style="background:#d29922"></span> <b>Yellow</b> — partial</div><div><span style="background:#f85149"></span> <b>Red</b> — trifecta</div></div>`;
   detail.innerHTML = html;
-});
+}
 </script>
 </body>
 </html>
