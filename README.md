@@ -1,20 +1,28 @@
 # nemoclaw-stack
 
-Deployment orchestration for [NemoClaw](https://github.com/NVIDIA/NemoClaw) and [OpenShell](https://github.com/NVIDIA/OpenShell). Composes auxiliary services (LLM proxy, approval bridge) alongside the core sandbox runtime.
+Deployment orchestration for [NemoClaw](https://github.com/NVIDIA/NemoClaw) and [OpenShell](https://github.com/NVIDIA/OpenShell). Composes auxiliary services (LLM proxy, mediator, approval bridge) alongside the core sandbox runtime.
 
 ## Architecture
 
 ```
 nemoclaw-stack/
-├── openshell/          # OpenShell submodule (sandbox runtime, policy engine)
-├── nemoclaw/           # NemoClaw submodule (agent CLI, onboarding)
+├── openshell/              # OpenShell submodule (sandbox runtime, mediator)
+├── nemoclaw/               # NemoClaw submodule (agent CLI, onboarding)
 ├── services/
-│   ├── litellm/        # LiteLLM proxy — tiered model routing
-│   └── approval-bridge/# Telegram approval bridge for policy webhooks
+│   ├── litellm/            # LiteLLM proxy — tiered model routing (HTTPS)
+│   └── approval-bridge/    # Telegram approval bridge for policy webhooks
 ├── scripts/
-│   └── build_litellm_config.py  # Merges model + provider configs
-├── docker-compose.yml
-└── start.sh            # Colima + compose launcher
+│   ├── build_litellm_config.py   # Merges model + provider configs
+│   ├── resolve-secrets.sh        # Secret resolution (env or Keychain)
+│   ├── store-secrets.sh          # Import secrets to macOS Keychain
+│   └── verify-models.sh          # Verify model IDs against live APIs
+├── tests/
+│   ├── honeypot/           # Red team honeypot (fake PII, WhatsApp bridge)
+│   └── boot-prompts/       # Test system prompts for sandbox injection
+├── docs/
+│   ├── eight-syscalls.html # Design doc: 11 mediator syscalls
+│   └── agent-syscall-guide.md  # Agent system prompt: syscalls + policy design
+└── stack.sh                # Unified CLI
 ```
 
 ## Quick Start
@@ -25,67 +33,124 @@ git clone --recurse-submodules <repo-url>
 cd nemoclaw-stack
 
 # Copy and fill in secrets
-cp .env.example .env
 cp services/litellm/.env.example services/litellm/.env
-# Edit both .env files with your API keys
+# Edit with your API keys (Anthropic, OpenAI, Google, xAI, Mistral, OpenRouter)
 
-# Start everything (handles Colima, config build, and compose)
-./start.sh
+# Start everything (Colima, LiteLLM, OpenShell, model verification)
+./stack.sh start
+
+# Create sandbox with NemoClaw
+./stack.sh create
+
+# Or with a test system prompt
+./stack.sh create --boot-prompt tests/boot-prompts/workflow-test.md
 ```
 
 ## Services
 
-### LiteLLM Proxy (port 4000)
+### LiteLLM Proxy (HTTPS, port 4000)
 
-Tiered model routing with sensitivity-aware provider selection.
+Tiered model routing with sensitivity-aware provider selection. Self-signed TLS cert auto-generated on first start.
 
-| Tier | Sensitive | Non-sensitive |
-|------|-----------|---------------|
-| Opus | Western providers only | + OpenRouter open-weight/Chinese models |
-| Sonnet | Western providers only | + OpenRouter open-weight/Chinese models |
-| Haiku | Western providers only | + OpenRouter open-weight/Chinese models |
+| Tier | Sensitive (ZDR) | Non-sensitive |
+|------|-----------------|---------------|
+| Opus | Anthropic, OpenAI, Google, xAI, Mistral | + DeepSeek, Qwen, Kimi |
+| Sonnet | Same + NVIDIA Nemotron | + DeepSeek, Qwen, GLM, Llama |
+| Haiku | Same (no NVIDIA yet) | + DeepSeek, Qwen, Llama, GLM, MiniMax |
 
-Sensitive tiers restrict to Anthropic, OpenAI, Google, xAI, Mistral, and NVIDIA (via whitelisted OpenRouter providers). Non-sensitive tiers add DeepSeek, Qwen, GLM, Llama, and others.
+Sensitive tiers enforce zero-data-retention via OpenRouter `zdr: true` + 43-provider whitelist. Routing: `latency-based-routing`, 6 retries, 30s cooldown, cross-tier fallback (opus→sonnet→haiku, never cross sensitivity).
 
-**Config files** (`services/litellm/config/`):
-- `models.yaml` — model list with YAML anchors for DRY sensitive/nonsensitive inheritance
-- `trusted_providers.yaml` — OpenRouter western-only provider whitelist
-- `litellm_config.yaml` — router settings and fallback chains
+**Config** (`services/litellm/config/`):
+- `models.yaml` — model list (YAML anchors for DRY inheritance)
+- `trusted_providers.yaml` — OpenRouter western-only whitelist
+- `litellm_config.yaml` — router + general settings
 
-After editing config sources, rebuild: `python3 scripts/build_litellm_config.py`
+Rebuild after editing: `python3 scripts/build_litellm_config.py`
+
+### Mediator (UDS, inside sandbox)
+
+11-syscall policy engine running as `mediator-daemon` inside the sandbox container.
+
+| Category | Syscalls |
+|----------|----------|
+| Network | `http_request` |
+| Policy CRUD | `policy_propose`, `policy_list`, `policy_get`, `revoke_policy` |
+| Process | `fork_with_policy`, `signal`, `request_port` |
+| IPC | `ipc_send`, `ipc_connect` |
+| Discovery | `ps` |
+
+**Taint analysis:** Per-data-type-tag static analysis at `policy_propose` time. Detects the lethal trifecta (private data + untrusted content + external communication). 8 scrubber types break taint chains on IPC.
+
+**Agent access:** `mediator-cli` binary inside the sandbox. See `docs/agent-syscall-guide.md`.
 
 ### Approval Bridge (port 8090)
 
-Receives HMAC-signed webhooks from OpenShell's approval API and presents them as Telegram inline-button prompts. Approvers tap approve/deny in Telegram; the bridge holds the decision until OpenShell polls for it.
+Receives webhooks from the mediator and presents policy proposals as Telegram inline-button prompts. Also handles mediator syscall approval for init process.
 
 Requires: `TELEGRAM_BOT_TOKEN`, `TELEGRAM_CHAT_ID`, `WEBHOOK_SECRET` in `.env`.
 
-## start.sh
+## stack.sh
 
 ```bash
-./start.sh              # start all services
-./start.sh litellm      # start specific service
-./start.sh down          # stop everything
-./start.sh ps            # show status
-./start.sh logs litellm  # tail logs
+./stack.sh start                    # Build + start infrastructure
+./stack.sh create                   # Create sandbox + onboard NemoClaw
+./stack.sh create --boot-prompt F   # Create with injected AGENTS.md
+./stack.sh stop                     # Graceful teardown
+./stack.sh stop --clean             # Teardown + wipe state/certs/secrets
+./stack.sh ps                       # Component status
+./stack.sh health                   # Quick: endpoints + tier routing
+./stack.sh health --full            # Also test all OpenRouter providers
+./stack.sh verify-models            # Verify every model ID against live APIs
+./stack.sh env                      # Print shell exports
+./stack.sh run <cmd>                # Run command with stack env
 ```
 
-Handles Colima startup (with `COLIMA_HOME=/Volumes/macmini1/config/colima`), docker-compose plugin linking, and auto-rebuilds the LiteLLM config when source files are newer than the built output.
+`start` builds OpenShell CLI + mediator binaries, starts LiteLLM with TLS, verifies all model IDs (blocks on failure), and builds the cluster image. `create` onboards NemoClaw, uploads mediator-cli + mediator-daemon + agent syscall guide to the sandbox, and optionally injects a boot prompt.
 
 ## Submodules
 
-| Submodule | Upstream | Branch |
-|-----------|----------|--------|
-| `openshell/` | NVIDIA/OpenShell | `feat/policy-audit-log` |
-| `nemoclaw/` | NVIDIA/NemoClaw | `main` |
+| Submodule | Fork | Branch |
+|-----------|------|--------|
+| `openshell/` | zaristei/OpenShell | `feat/mediator-init-bootstrap` |
+| `nemoclaw/` | zaristei/NemoClaw | `feat/nemoclaw-home-env-v2` |
 
-Update submodules: `git submodule update --remote`
+Update: `cd <submodule> && git fetch fork && git checkout fork/<branch>`, then commit from repo root.
+
+## Testing
+
+### Mediator (167 Rust tests)
+
+```bash
+cd ~/repos/OpenShell
+cargo test -p openshell-sandbox --lib mediator           # 141 unit tests
+cargo test -p openshell-sandbox --test mediator_integration  # 10 protocol tests
+cargo test -p openshell-sandbox --test trifecta_e2e          # 10 taint tests
+cargo test -p openshell-sandbox --test workflow_e2e          # 5 doc workflow tests
+cargo test -p openshell-sandbox --test fullstack_workflow_e2e # 1 full lifecycle test
+```
+
+### Stack health
+
+```bash
+./stack.sh health          # LiteLLM + providers + tier routing
+./stack.sh health --full   # + all 43 OpenRouter providers individually
+./stack.sh verify-models   # Every model ID against live APIs
+```
+
+### Honeypot (red team)
+
+```bash
+./stack.sh create --boot-prompt tests/boot-prompts/honeypot-ops.md
+# WhatsApp bridge: python3 tests/honeypot/bridge_sync.py (host)
+# Agent: tests/honeypot/agent_sandbox.py (inside sandbox)
+# Twilio sandbox: text "join equator-gather" to +1 415 523 8886
+```
 
 ## Environment Files
 
 | File | Purpose |
 |------|---------|
 | `.env` | Approval bridge: Telegram bot token, chat ID, webhook secret |
-| `services/litellm/.env` | LiteLLM: API keys for Anthropic, OpenAI, Google, xAI, Mistral, OpenRouter |
+| `services/litellm/.env` | LiteLLM: API keys for all providers + master key |
 
-Both are gitignored. Copy from their `.env.example` counterparts.
+Both are gitignored. Copy from `.env.example` counterparts.
