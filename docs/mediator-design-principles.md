@@ -261,16 +261,30 @@ The same policy/IPC/scrubber model extends to cross-sandbox channels. Two NemoCl
 
 ## Implementation Status
 
-| Component | Status | Tests |
-|-----------|--------|-------|
-| 10 syscalls over UDS | Complete | 135 unit + 10 integration |
-| Per-tag taint analysis | Complete | 10 trifecta e2e |
-| 8 scrubber types | Complete | 27 unit |
-| Implicit sensitivity | Complete | 3 unit |
-| mediator-daemon + mediator-cli | Complete | Deployed to sandbox |
-| NemoClaw entrypoint hook | Complete | Backward compatible |
-| Agent syscall guide | Complete | 467 lines |
-| Doc workflow e2e tests | Complete | 5 scenarios |
-| Full-stack e2e test | Complete | 1 lifecycle test |
-| WhatsApp honeypot | Complete | Live red team |
-| **Total tests** | **161** | All passing |
+### Complete
+
+| Component | Tests |
+|-----------|-------|
+| 10 syscalls over UDS | 135 unit + 10 integration |
+| Per-tag taint analysis | 10 trifecta e2e |
+| 8 scrubber types (regex, field, NER, schema, canary, delimiter, instruction strip) | 27 unit |
+| Implicit sensitivity (clean writers produce sensitive data) | 3 unit |
+| mediator-daemon + mediator-cli (cross-compiled Linux aarch64) | Deployed to sandbox |
+| NemoClaw entrypoint hook (backward compatible) | — |
+| Agent syscall guide (467 lines) | — |
+| Doc workflow e2e tests (5 scenarios from design doc) | 5 e2e |
+| Full-stack lifecycle test (propose → fork → IPC → scrub → signal → revoke) | 1 e2e |
+| **Total** | **161 tests, all passing** |
+
+### Next: Deployment & Security Testing
+
+| Item | Description |
+|------|-------------|
+| End-to-end deployment testing | Full stack boot → sandbox creation → mediator daemon → agent workflow execution, verified in CI |
+| NemoClaw plugin integration | Register mediator tools as native OpenClaw tools (not shell wrappers) |
+| Bake binaries into container image | Eliminate manual upload — mediator-daemon + mediator-cli built into Dockerfile |
+| Blueprint-level policy presets | Pre-approved policies ship with the NemoClaw blueprint, no runtime approval needed |
+| Red team security audit | Structured adversarial testing: prompt injection via IPC, scrubber bypass attempts, policy escalation, side-channel exfiltration |
+| Scrubber coverage verification | Validate that declared scrubber fields match actual data shapes across all policies |
+| ipc_connect frame-level scrubbing | Currently raw byte relay — needs length-prefixed JSON framing for per-message scrubbing on streams |
+| Cross-sandbox IPC | Extend mediator model to gateway-mediated channels between separate NemoClaw instances |
