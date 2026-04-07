@@ -66,34 +66,34 @@ You don't need a custom observability stack. Standard Linux tools give you per-p
 
 ### Declarative Trifecta Monitoring
 
-Each policy class (and every process running under it) can be declaratively monitored for trifecta violations. The mediator computes the taint graph at policy-proposal time and serves it via a dashboard:
+Each policy class (and every process running under it) can be declaratively monitored for trifecta violations. The mediator computes the taint graph at policy-proposal time and serves it via a dashboard.
 
-**[Open the live interactive taint graph →](https://zaristei.github.io/nemoclaw-stack/taint-graph.html)**
+The graph below shows the honeypot deployment — 4 policies, scrubbed IPC channels, per-tag taint classification:
 
-The graph below shows the honeypot deployment — 4 policies, scrubbed IPC channels, per-tag taint classification. Green = clean, yellow = partial (has source but no trifecta), red = violation. Solid edges = scrubbed IPC (de_taints). Dashed = raw.
+```mermaid
+graph LR
+    CR["🟡 customer_reader_v1<br/>source(pii)<br/>/data/customers.json (r)"]
+    ER["🟡 email_reader_v1<br/>source(pii, internal)<br/>/data/email (r)"]
+    FM["🟡 financial_monitor_v1<br/>source(pii, financial)<br/>/data/financial (r)"]
+    INIT["🟢 init_v0<br/>no mounts · no HTTP<br/>inference only · 0 legs"]
 
-```
-    ┌──────────────────┐     field_pii      ┌──────────┐
-    │ customer_reader_v1├────(scrubbed)────→│          │
-    │  source(pii)      │                    │  init_v0 │
-    │  no sink, no untrust│                    │  (green) │
-    │  (yellow)         │                    │  no legs │
-    └──────────────────┘                    │          │
-                                            │          │
-    ┌──────────────────┐     field_pii      │          │
-    │  email_reader_v1  ├────(scrubbed)────→│          │
-    │  source(pii,int)  │                    │          │
-    │  (yellow)         │                    │          │
-    └──────────────────┘                    │          │
-                                            │          │
-    ┌──────────────────┐     regex_pii      │          │
-    │financial_monitor_v1├────(scrubbed)────→│          │
-    │  source(pii,fin)  │                    │          │
-    │  (yellow)         │                    └──────────┘
-    └──────────────────┘
+    CR -->|"field_pii ✓<br/>$.email $.ssn $.phone $.address → ⬛"| INIT
+    ER -->|"field_pii ✓<br/>$.from $.to $.body → ⬛"| INIT
+    FM -->|"regex_pii ✓<br/>SSN email phone CC → ⬛"| INIT
+
+    style CR fill:#161b22,stroke:#d29922,color:#c9d1d9
+    style ER fill:#161b22,stroke:#d29922,color:#c9d1d9
+    style FM fill:#161b22,stroke:#d29922,color:#c9d1d9
+    style INIT fill:#161b22,stroke:#3fb950,color:#c9d1d9
 ```
 
-Every reader has source(T) — one leg. No reader has HTTP or bind_ports — no untrusted input, no sink. IPC to init is scrubbed with `de_taints: true` — the taint chain is broken. Init has zero legs. No trifecta anywhere in the graph.
+> 🟢 Green = clean (0-1 legs) · 🟡 Yellow = source only (1 leg) · 🔴 Red = trifecta (3 legs same tag)
+>
+> Arrows = IPC channels with scrubber name. `✓` = `de_taints: true` (breaks taint chain). `⬛` = `[REDACTED]`.
+>
+> **[Interactive version with click-to-inspect →](https://zaristei.github.io/nemoclaw-stack/taint-graph.html)**
+
+Every reader has source(T) — one leg. No reader has HTTP or bind_ports — no untrusted input, no sink. IPC to init is scrubbed with `de_taints: true` — the taint chain is broken. Init has zero legs. **No trifecta anywhere in the graph.**
 
 The graph updates live as policies are proposed and approved. The operator sees at a glance whether any policy class has a trifecta violation, which IPC channels are scrubbed, and where the data flows. A new policy proposal shows up as a projected node with its taint state — before the operator even approves it.
 
