@@ -85,7 +85,7 @@ Watch for these patterns in task descriptions — they're trifecta traps:
 
 If you can't tell whether something is a trifecta risk, propose the policy anyway — the taint analysis will warn you, and you can redesign before the operator decides.
 
-## The 11 Syscalls
+## The 10 Syscalls
 
 ### Reading State
 
@@ -96,18 +96,6 @@ Returns workflows whose policy name matches your `allowed_ipc_targets` patterns.
 ```json
 {"method": "ps", "params": {}}
 → [{"workflow_id": "wf_fetcher_001", "policy_name": "fetcher_v1"}, ...]
-```
-
-### Network
-
-**http_request** — Make HTTP requests (init-only gate).
-
-If you are the init process, this executes HTTP requests checked against your `http_allowlist`. If you are a child workflow, your traffic goes through the UID-matched proxy automatically — the proxy checks your policy's allowlist. Batch requests when possible.
-
-```json
-{"method": "http_request", "params": {
-  "requests": [{"method": "GET", "url": "https://api.example.com/data"}]
-}}
 ```
 
 ### Process Management

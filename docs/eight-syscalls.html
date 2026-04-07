@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Eleven Syscalls for an AI Agent Sandbox</title>
+<title>Ten Syscalls for an AI Agent Sandbox</title>
 <link href="https://fonts.googleapis.com/css2?family=Crimson+Pro:ital,wght@0,400;0,500;0,600;0,700;1,400;1,500&family=DM+Mono:wght@400;500&display=swap" rel="stylesheet">
 <style>
   :root {
@@ -272,7 +272,7 @@
 
 <header class="post-header">
   <div class="post-meta">Architecture Notes &middot; April 2026</div>
-  <h1>Eleven Syscalls for an AI Agent Sandbox</h1>
+  <h1>Ten Syscalls for an AI Agent Sandbox</h1>
   <p class="post-subtitle">Reasoning from Linux kernel primitives to a minimal, complete API for an agentic AI runtime &mdash; and discovering along the way why the kernel has so many syscalls.</p>
 </header>
 
@@ -338,24 +338,17 @@
 <!-- =============================== SYSCALLS =============================== -->
 
 <div class="divider"></div>
-<h2>The Eleven Syscalls</h2>
-
-<div class="syscall-card net">
-  <h3>1. http_request</h3>
-  <div class="sig">http_request(<br>&nbsp;&nbsp;requests: [{method: str, url: str, headers: obj, body: obj}],<br>&nbsp;&nbsp;workflow_token: str<br>) &rarr; Response[] | ENETDENIED</div>
-  <p>Every outbound API call flows through this primitive. Accepts a batch of one or more requests. The sandbox validates each URL against the workflow's allowlist, scrubs outbound payloads via Presidio (tokenize-then-rehydrate for PII), and makes the actual HTTP calls from its own process. Responses are sanitized before returning to the agent's context. Streaming is handled transparently by the sandbox based on what the upstream server returns &mdash; the agent doesn't need to know or care about the protocol.</p>
-  <p>The agent's namespace has no direct network access. iptables drops all outbound from its UID except to the sandbox's Unix socket.</p>
-</div>
+<h2>The Ten Syscalls</h2>
 
 <div class="syscall-card policy">
-  <h3>2. policy_propose</h3>
+  <h3>1. policy_propose</h3>
   <div class="sig">policy_propose(config: obj) &rarr; { approved: bool } | ENOPRIV</div>
   <p>The agent's mechanism for requesting new capabilities. It submits a complete policy configuration (see below) to the sandbox, which forwards it to the Telegram approval channel. The operator sees the full spec, approves or denies. The agent gets back a simple boolean.</p>
   <p>Policies are immutable once approved. If the agent needs different capabilities, it proposes a new policy with a new name. This eliminates the complexity of tracking mid-flight policy mutations &mdash; old processes keep the old policy, new processes get the new one.</p>
 </div>
 
 <div class="syscall-card proc">
-  <h3>3. fork_with_policy</h3>
+  <h3>2. fork_with_policy</h3>
   <div class="sig">fork_with_policy(<br>&nbsp;&nbsp;workflow_id: str,<br>&nbsp;&nbsp;policy_name: str,<br>&nbsp;&nbsp;inherit: bool<br>) &rarr; { pid: int, workflow_token: str, inherited_from: str | null } | EPERM</div>
   <p>Spawns a child workflow as a new UID. The sandbox allocates a unique UID, creates a per-UID directory (mode 700), sets up POSIX ACLs on external mounts, installs per-UID iptables rules, applies Landlock and seccomp in pre_exec, and returns a new workflow token bound to the child's UID and PID.</p>
   <p>The <code>inherit</code> flag controls token inheritance. If <code>true</code>, the child's token carries the parent's policy as well &mdash; syscalls are evaluated against the union of both policies. If <code>false</code>, the child has only its own policy. The sandbox validates the inherit flag against the parent's policy definition; the agent can't force inheritance if it wasn't approved.</p>
@@ -363,50 +356,50 @@
 </div>
 
 <div class="syscall-card net">
-  <h3>4. request_port</h3>
+  <h3>3. request_port</h3>
   <div class="sig">request_port(workflow_token: str) &rarr; { port: int } | ENOSPC | EPERM</div>
   <p>Allocates a port from the workflow's declared port range. The sandbox maintains a global port allocation table. First-come-first-served &mdash; if the range is exhausted, returns ENOSPC. The agent can propose a new policy with a different range if needed.</p>
 </div>
 
 <div class="syscall-card ipc">
-  <h3>5. ipc_send</h3>
+  <h3>4. ipc_send</h3>
   <div class="sig">ipc_send(<br>&nbsp;&nbsp;target_workflow_id: str,<br>&nbsp;&nbsp;message: obj,<br>&nbsp;&nbsp;workflow_token: str<br>) &rarr; { ack: bool } | EPERM</div>
   <p>Sends a one-shot message to a workflow in a different namespace. The sandbox checks that both sides' policies list each other in <code>allowed_ipc_targets</code>. The sandbox writes the message to a file in the target workflow's namespace inbox. No direct channel between namespaces ever exists.</p>
 </div>
 
 <div class="syscall-card ipc">
-  <h3>6. ipc_connect</h3>
+  <h3>5. ipc_connect</h3>
   <div class="sig">ipc_connect(<br>&nbsp;&nbsp;target_workflow_id: str,<br>&nbsp;&nbsp;workflow_token: str<br>) &rarr; { stream_handle: str } | EPERM</div>
   <p>Opens a persistent bidirectional channel to another namespace. Same policy checks as <code>ipc_send</code>. The sandbox creates a proxied stream between the two namespaces &mdash; it sits in the middle and can inspect, log, or terminate the connection at any point.</p>
 </div>
 
 <div class="syscall-card info">
-  <h3>7. ps</h3>
+  <h3>6. ps</h3>
   <div class="sig">ps(workflow_token: str) &rarr; [{ workflow_id: str, policy_name: str }] | EPERM</div>
   <p>Discovers active workflows. Returns only workflows whose policy name matches the caller's <code>allowed_ipc_targets</code>. A workflow can't see workflows it's not allowed to talk to. This provides the workflow IDs needed for <code>ipc_send</code>, <code>ipc_connect</code>, and <code>signal</code>.</p>
 </div>
 
 <div class="syscall-card proc">
-  <h3>8. signal</h3>
+  <h3>7. signal</h3>
   <div class="sig">signal(<br>&nbsp;&nbsp;target_workflow_id: str,<br>&nbsp;&nbsp;signal: str,<br>&nbsp;&nbsp;workflow_token: str<br>) &rarr; { ack: bool } | EPERM</div>
   <p>Sends a control signal to another workflow's namespace. Supported signals: <code>term</code> (graceful shutdown), <code>kill</code> (forced termination), <code>stop</code> (pause), <code>cont</code> (resume). The sandbox validates the signal type against the caller's <code>allowed_signal_targets</code> policy, then sends the corresponding OS signal to the target namespace's root PID. The kernel handles the rest &mdash; killing the root PID of a namespace tears down everything inside it.</p>
 </div>
 
 <div class="syscall-card policy">
-  <h3>9. revoke_policy</h3>
+  <h3>8. revoke_policy</h3>
   <div class="sig">revoke_policy(policy_name: str, workflow_token: str) &rarr; { ack: bool, affected: int } | EPERM</div>
   <p>Removes a policy from the approved set and propagates to all affected workflows. Hard revoke kills all processes running as affected UIDs and tears down their resources. Soft revoke recomputes the effective policy without the revoked one &mdash; in-flight requests to revoked-only endpoints start getting denied.</p>
   <p>Revocation is strictly a reduction of capability. The agent cannot escalate by revoking. The operator can also revoke directly via the Telegram approval channel without involving the agent.</p>
 </div>
 
 <div class="syscall-card info">
-  <h3>10. policy_list</h3>
+  <h3>9. policy_list</h3>
   <div class="sig">policy_list(workflow_token: str) &rarr; [{ policy_name, rationale }]</div>
   <p>Returns names and rationales of all approved policies visible to the caller. Visibility is scoped by <code>allowed_ipc_targets</code> &mdash; you only see policies whose names match your IPC target patterns, plus your own. Init (with wildcard targets) sees everything. This enables the proactive capability acquisition loop: check what exists before proposing new policies.</p>
 </div>
 
 <div class="syscall-card info">
-  <h3>11. policy_get</h3>
+  <h3>10. policy_get</h3>
   <div class="sig">policy_get(policy_name: str, workflow_token: str) &rarr; MediationPolicy | ENOENT</div>
   <p>Returns the full configuration of a specific policy if it exists and is visible to the caller. Use this to inspect a policy's HTTP allowlist, mounts, IPC targets, and scrubber configs before deciding to fork a child with it. Same visibility rules as <code>policy_list</code>.</p>
 </div>

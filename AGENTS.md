@@ -52,7 +52,7 @@ This repo orchestrates NemoClaw and OpenShell services for local development and
 
 ## Mediator
 
-The mediator is a UDS-based syscall mediation layer with 11 syscalls, per-data-type taint analysis, and 8 scrubber types.
+The mediator is a UDS-based syscall mediation layer with 10 syscalls, per-data-type taint analysis, and 8 scrubber types.
 
 ### Architecture
 
@@ -61,11 +61,10 @@ The mediator is a UDS-based syscall mediation layer with 11 syscalls, per-data-t
 - Both binaries require the `mediator-tools` cargo feature: `cargo build --features mediator-tools --bin mediator-cli --bin mediator-daemon`.
 - Socket: `/run/openshell/mediator.sock`, DB: SQLite, Token: `/run/openshell/mediator.sock.token`.
 
-### 11 Syscalls
+### 10 Syscalls
 
 | Category | Syscalls |
 |----------|----------|
-| Network | `http_request` |
 | Policy CRUD | `policy_propose`, `policy_list`, `policy_get`, `revoke_policy` |
 | Process | `fork_with_policy`, `signal`, `request_port` |
 | IPC | `ipc_send`, `ipc_connect` |
@@ -127,7 +126,7 @@ cargo zigbuild --release --target aarch64-unknown-linux-musl -p openshell-sandbo
 
 ### Mediator (Rust, in ~/repos/OpenShell)
 
-- 167 tests total: 141 unit + 10 mediator integration + 10 trifecta e2e + 5 workflow e2e + 1 fullstack
+- 161 tests total: 135 unit + 10 mediator integration + 10 trifecta e2e + 5 workflow e2e + 1 fullstack
 - `cargo test -p openshell-sandbox --lib mediator` — unit tests (scrubbers, taint analysis, store, daemon)
 - `cargo test -p openshell-sandbox --test mediator_integration` — UDS protocol tests
 - `cargo test -p openshell-sandbox --test trifecta_e2e` — taint enforcement over UDS

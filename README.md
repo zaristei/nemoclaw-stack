@@ -73,7 +73,6 @@ Rebuild after editing: `python3 scripts/build_litellm_config.py`
 
 | Category | Syscalls |
 |----------|----------|
-| Network | `http_request` |
 | Policy CRUD | `policy_propose`, `policy_list`, `policy_get`, `revoke_policy` |
 | Process | `fork_with_policy`, `signal`, `request_port` |
 | IPC | `ipc_send`, `ipc_connect` |
@@ -118,11 +117,11 @@ Update: `cd <submodule> && git fetch fork && git checkout fork/<branch>`, then c
 
 ## Testing
 
-### Mediator (167 Rust tests)
+### Mediator (161 Rust tests)
 
 ```bash
 cd ~/repos/OpenShell
-cargo test -p openshell-sandbox --lib mediator           # 141 unit tests
+cargo test -p openshell-sandbox --lib mediator           # 135 unit tests
 cargo test -p openshell-sandbox --test mediator_integration  # 10 protocol tests
 cargo test -p openshell-sandbox --test trifecta_e2e          # 10 taint tests
 cargo test -p openshell-sandbox --test workflow_e2e          # 5 doc workflow tests

@@ -59,11 +59,10 @@ In the mediator:
 - An agent cannot directly access data, the network, or other agents. It makes a syscall over a Unix domain socket, the mediator validates against the caller's policy, and either performs the operation or returns an error.
 - The boundary is enforced by UID isolation, iptables, filesystem permissions, and seccomp — not by the system prompt.
 
-### The 11 Syscalls
+### The 10 Syscalls
 
 | Syscall | Kernel Analogy | Why It's Mediated |
 |---------|---------------|-------------------|
-| `http_request` | `connect()` + `send()` | Network egress is the primary exfiltration channel |
 | `policy_propose` | `exec()` with new capabilities | The agent designs its own security policies |
 | `policy_list` | `ls /proc/` | Discovery — check what's available before proposing |
 | `policy_get` | `cat /proc/pid/status` | Inspect a policy's scrubbers and allowlists before forking |
@@ -189,7 +188,7 @@ The same policy/IPC/scrubber model extends to cross-sandbox channels. Two NemoCl
 
 | Component | Status | Tests |
 |-----------|--------|-------|
-| 11 syscalls over UDS | Complete | 141 unit + 10 integration |
+| 10 syscalls over UDS | Complete | 135 unit + 10 integration |
 | Per-tag taint analysis | Complete | 10 trifecta e2e |
 | 8 scrubber types | Complete | 27 unit |
 | Implicit sensitivity | Complete | 3 unit |
@@ -199,4 +198,4 @@ The same policy/IPC/scrubber model extends to cross-sandbox channels. Two NemoCl
 | Doc workflow e2e tests | Complete | 5 scenarios |
 | Full-stack e2e test | Complete | 1 lifecycle test |
 | WhatsApp honeypot | Complete | Live red team |
-| **Total tests** | **167** | All passing |
+| **Total tests** | **161** | All passing |
