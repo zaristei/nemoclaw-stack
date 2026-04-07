@@ -24,9 +24,22 @@ import time
 import threading
 from http.server import HTTPServer, BaseHTTPRequestHandler
 from urllib.parse import urlencode
-from urllib.request import Request, urlopen
+from urllib.request import Request, urlopen, ProxyHandler, build_opener
 from urllib.error import URLError
 import base64
+import ssl
+
+# SSL context for self-signed certs (proxy)
+_ssl_ctx = ssl.create_default_context()
+_ssl_ctx.check_hostname = False
+_ssl_ctx.verify_mode = ssl.CERT_NONE
+
+# Build opener with proxy support
+_proxy_url = os.environ.get("HTTPS_PROXY", os.environ.get("https_proxy", ""))
+if _proxy_url:
+    _opener = build_opener(ProxyHandler({"https": _proxy_url, "http": _proxy_url}))
+else:
+    _opener = build_opener()
 
 TWILIO_SID = os.environ["TWILIO_SID"]
 TWILIO_AUTH_TOKEN = os.environ["TWILIO_AUTH_TOKEN"]
@@ -45,7 +58,7 @@ credentials = base64.b64encode(f"{TWILIO_SID}:{TWILIO_AUTH_TOKEN}".encode()).dec
 def twilio_get(path):
     url = f"https://api.twilio.com/2010-04-01/Accounts/{TWILIO_SID}/{path}"
     req = Request(url, headers={"Authorization": f"Basic {credentials}"})
-    with urlopen(req, timeout=15) as resp:
+    with _opener.open(req, timeout=15) as resp:
         return json.loads(resp.read())
 
 
@@ -53,7 +66,7 @@ def twilio_post(path, data):
     url = f"https://api.twilio.com/2010-04-01/Accounts/{TWILIO_SID}/{path}"
     encoded = urlencode(data).encode()
     req = Request(url, data=encoded, headers={"Authorization": f"Basic {credentials}"})
-    with urlopen(req, timeout=15) as resp:
+    with _opener.open(req, timeout=15) as resp:
         return json.loads(resp.read())
 
 
