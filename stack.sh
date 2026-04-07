@@ -703,8 +703,10 @@ EOF
 _wait_for_litellm() {
     local max_wait=90
     local elapsed=0
+    local auth_header=""
+    [[ -n "${LITELLM_MASTER_KEY:-}" ]] && auth_header="Authorization: Bearer ${LITELLM_MASTER_KEY}"
     while ! curl -sfk --max-time 2 "https://localhost:4000/health/liveliness" \
-        -H "Authorization: Bearer ${LITELLM_MASTER_KEY}" >/dev/null 2>&1; do
+        ${auth_header:+-H "$auth_header"} >/dev/null 2>&1; do
         sleep 1
         ((elapsed++))
         if [[ $elapsed -ge $max_wait ]]; then
