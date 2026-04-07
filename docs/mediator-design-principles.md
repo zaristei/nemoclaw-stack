@@ -42,6 +42,56 @@ An autonomous agent that can't acquire new capabilities is limited to what the o
 
 The operator doesn't need to predict every possible task. They review and approve process-level policy proposals as they arise. The approval is structural (reviewing a policy config + taint analysis) not behavioral (reviewing individual HTTP requests in the TUI).
 
+### Process-Level Isolation is an OS Primitive
+
+This isn't a novel enforcement mechanism — it's how operating systems already work. Per-process resource isolation is built into Linux:
+
+- **UIDs** scope filesystem access, network rules, and process visibility. Each policy gets its own UID. `iptables -m owner --uid-owner` restricts network per-process. Landlock and POSIX ACLs restrict filesystem per-process. `hidepid=2` on `/proc` hides other users' processes.
+- **Seccomp** locks down the system call surface per-process. Dangerous calls (`ptrace`, `mount`, `setuid`, `memfd_create`) are blocked at the kernel level.
+- **Groups (GIDs)** map to policy classes. Processes under the same policy share a GID for setgid directories. Processes under different policies are in different groups.
+
+None of this requires custom kernel modules or container orchestration. It's standard Linux security primitives applied at the right granularity.
+
+### Existing OS Tooling Works
+
+Because isolation is process-level, existing OS monitoring and debugging tools apply directly:
+
+- **`strace -p <pid>`** traces a specific workflow's system calls
+- **`/proc/<pid>/net/tcp`** shows what network connections a workflow has open
+- **`auditd`** rules can watch per-UID file access, network connections, IPC
+- **`ss -p`** shows socket ownership by process — which workflow is talking to which
+- **iptables logging** per UID shows every blocked and allowed network request
+
+You don't need a custom observability stack. Standard Linux tools give you per-process, per-policy visibility for free.
+
+### Declarative Trifecta Monitoring
+
+Each policy class (and every process running under it) can be declaratively monitored for trifecta violations. The mediator computes the taint graph at policy-proposal time and serves it via a dashboard:
+
+```
+┌─────────────────────────────────────────────────────────────┐
+│  Policy Graph — Taint Dashboard                             │
+│                                                             │
+│   ┌──────────┐          ┌──────────┐         ┌──────────┐  │
+│   │ reader_v1│──IPC───→│  init_v0 │←──IPC──│fetcher_v1│  │
+│   │  (green) │ scrub:  │  (green) │ scrub: │ (yellow) │  │
+│   │          │ field_  │          │  delim │          │  │
+│   │ src: pii │ pii     │ no legs  │  iter  │ untrust: │  │
+│   │ no sink  │         │          │        │ web_cont │  │
+│   │ no untrust│         │          │        │ sink: http│  │
+│   └──────────┘          └──────────┘         └──────────┘  │
+│                                                             │
+│   Green = clean (0-1 legs)                                  │
+│   Yellow = partial (2 legs)                                 │
+│   Red = TRIFECTA (all 3 legs for same data type)            │
+│                                                             │
+│   Edges show IPC channels. Solid = scrubbed. Dashed = raw.  │
+│   Click a node to see per-tag breakdown.                    │
+└─────────────────────────────────────────────────────────────┘
+```
+
+The graph updates live as policies are proposed and approved. The operator sees at a glance whether any policy class has a trifecta violation, which IPC channels are scrubbed, and where the data flows. A new policy proposal shows up as a dashed node with its projected taint state — before the operator even approves it.
+
 ### The Approval Model
 
 ```
@@ -64,7 +114,9 @@ Policies are immutable. `research_scraper_v1` cannot be modified after approval.
 
 It also means the agent can reason about its own policy tree. It knows `v1` children have specific capabilities, `v2` children have different ones, and both can coexist. The audit trail is unambiguous.
 
-## Why Syscalls
+## Design Primitives
+
+### Syscalls: Leveraging the OS Analogy
 
 We call them syscalls because the analogy is precise. In an operating system:
 
