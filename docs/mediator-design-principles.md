@@ -6,24 +6,41 @@
 
 ---
 
-## The Core Idea: Agents Should Design Their Own Security
+## The Problem: Resource Access is Coupled to the Sandbox
 
-Today, an operator defines a static network policy before the agent starts. The agent runs within those bounds or gets blocked. This works for known workflows but fails when the agent encounters something new — it hits a wall, the operator gets paged, manual intervention follows.
+Today, when an agent hits a wall — it tries to reach a URL the proxy blocks, or it needs a file that isn't mounted — the operator has two options:
 
-The mediator inverts this. **The agent proposes its own security policies at runtime.** It analyzes the task, determines what data and network access it needs, designs a policy that avoids the lethal trifecta, and submits it for approval. The operator reviews a structured security proposal, not a raw URL allowlist request. The agent operates autonomously within the approved bounds.
+1. **Approve the request in the TUI.** This adds the URL to the sandbox's network policy. Now every process in the sandbox can reach that endpoint.
+2. **Reprovision the sandbox.** This adds the mount the agent needs. Now every process in the sandbox can read that data.
 
-This is the difference between "the agent runs inside a predefined box" and "the agent designs the box, the operator validates the design, and the agent builds the box around itself."
+Both options grant access to the **entire sandbox**, not to the specific task that needed it. If the agent needs web access for research AND access to customer records for a lookup, both capabilities end up in the same sandbox policy. Every process — the agent, its tools, any subprocess — gets both. That's a prompt injection away from exfiltration.
+
+The operator's choices are binary: approve for the whole sandbox or deny entirely. There's no way to say "this specific task can access this specific resource, but nothing else in the sandbox can."
+
+## The Solution: Couple Resource Access to the Process, Not the Sandbox
+
+The mediator decouples resource access from the sandbox. Instead of one policy governing the entire sandbox, **each process gets its own scoped policy.** When the agent needs a new capability, it doesn't ask the operator to widen the sandbox — it drafts a proposal for a new process with exactly the access that process needs.
+
+The flow:
+
+1. Agent needs web access for research → drafts a `fetcher_v1` policy (HTTP to specific URLs, no data mounts, no secrets)
+2. Agent needs customer records for a lookup → drafts a `reader_v1` policy (mount `/data/customers` read-only, no HTTP, scrubbed IPC egress)
+3. Operator reviews both proposals — sees structured policy configs with taint analysis, not raw URL requests
+4. Agent deploys each as a separate process with its own UID, its own iptables rules, its own filesystem view
+5. The fetcher can't read customer data. The reader can't reach the web. The agent coordinates via scrubbed IPC.
+
+After the operator approves a policy once, the agent can deploy that process whenever it's needed — as a tool call. No further approval. No TUI interaction. The agent proposes, the operator validates the structure, and the agent operates autonomously within those bounds.
 
 ### Why This Matters
 
-An autonomous agent that can't acquire new capabilities is limited to what the operator anticipated. An agent that can propose policies adapts to novel tasks:
+An autonomous agent that can't acquire new capabilities is limited to what the operator anticipated. An agent that designs its own process-level security adapts to novel tasks:
 
-- User asks the agent to research a new topic → agent proposes a fetcher policy with the relevant URLs
+- User asks the agent to research a new topic → agent proposes a fetcher policy with the relevant URLs, deploys it as a child process
 - Agent discovers it needs access to a new database → proposes a reader policy with the appropriate mounts and scrubbers
 - Agent needs to parallelize work → proposes child policies with scoped access for each subtask
 - Agent hits a rate limit on one provider → proposes a v2 policy with a different endpoint
 
-The operator doesn't need to predict every possible task. They review and approve policy proposals as they arise. The approval is structural (reviewing a policy config + taint analysis) not behavioral (reviewing individual HTTP requests).
+The operator doesn't need to predict every possible task. They review and approve process-level policy proposals as they arise. The approval is structural (reviewing a policy config + taint analysis) not behavioral (reviewing individual HTTP requests in the TUI).
 
 ### The Approval Model
 
