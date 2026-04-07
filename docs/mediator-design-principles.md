@@ -154,74 +154,75 @@ The policy CRUD syscalls (`propose`, `list`, `get`, `revoke`) are the distinctiv
 
 File I/O within a workflow's own mounts. Once `fork_with_policy` provisions the filesystem via Landlock + POSIX ACLs, the workflow operates at native speed. We tried mediating file access and removed it — the overhead was prohibitive and the security comes from provisioning, not per-operation checks.
 
-## The Lethal Trifecta
+## IPC as a Confinement Boundary
 
-### Definition
+Processes don't share memory. They communicate via IPC — `ipc_send` and `ipc_connect`. This is where the real security happens: the mediator sits on every IPC channel and can **monitor, confine, and transform** the data flowing between policies.
 
-A policy violates the lethal trifecta if, for the same data-type tag T, it simultaneously has:
+### Monitoring
 
-1. **Source(T):** Access to sensitive data of type T
-2. **Untrusted input(T):** Receives attacker-controlled content tagged T
-3. **Sink(T):** Can send data to an endpoint not trusted for type T
-
-### Why Per-Tag
-
-A policy with `source(pii)` and `sink(credentials)` is NOT a violation. The PII can't leak through the credentials sink — they're different data types. The analysis tracks each tag independently.
-
-### The Guarantee
-
-**If the taint analysis reports no trifecta, then:** For every data-type tag T, there is no policy-level execution path where data of type T flows from a sensitive source, through a process handling untrusted content of type T, to an untrusted external endpoint for type T.
-
-**What this doesn't cover:** Side channels, scrubber bugs, trust spec misclassification, binary exploits. The guarantee is against policy-level data flow, not all possible attacks.
-
-### Implicit Sensitivity
-
-Data written by a process with no untrusted input is presumed sensitive. A clean process only handles trusted data — everything it writes is derived from trusted sources. This eliminates manual workspace tagging. The classification is derived from the writer's policy profile.
-
-### How Dynamic Policy Creation Interacts With Trifecta
-
-When the agent proposes a policy, the taint analysis runs **before** the operator sees it. The proposal includes:
-
-- The policy config
-- Per-tag taint classification (source/untrusted/sink for each data type)
-- Whether any tag has all three legs (trifecta violation)
-- Which **existing** policies would be affected (their taint worsens if this policy is approved)
-- Pre-computed compromised resources that would be materialized at fork time
-
-The agent can propose a trifecta-violating policy. The operator will see a big red warning. They can approve it anyway (informed risk) or deny it (agent must redesign).
-
-The agent guide teaches the agent to **avoid trifecta proactively** by decomposing work:
+Every IPC message is visible to the mediator. It logs sender, receiver, timestamp, and scrubber results. You get a full audit trail of what data flowed between which processes:
 
 ```
-BAD:  one policy with sensitive data + untrusted HTTP + external sink
-GOOD: reader policy (data, scrubbed IPC out) + fetcher policy (HTTP, no data)
+[audit] wf_customer → init_v0 | ipc_send | field_pii applied: 4 redactions ($.email, $.ssn, $.phone, $.address)
+[audit] wf_email → init_v0 | ipc_send | field_pii applied: 3 redactions ($.from, $.to, $.body)
 ```
 
-The agent learns to design safe policies the same way a developer learns to write secure code — by understanding the principles and applying them. The difference is the taint analysis catches mistakes at proposal time, not at breach time.
+Combined with the OS-level monitoring (strace, auditd per-UID), you get complete visibility into both the data plane (what crossed which IPC channel) and the control plane (which syscalls each process made).
 
-## Scrubbers as Taint Transformers
+### Schema Confinement
 
-Scrubbers sit on IPC channels between policies. They come in two flavors:
-
-**Taint transformers** (`de_taints: true`): `regex_pii`, `field_pii`, `ner_pii`, `schema_enforcer`. These change the data's classification — after scrubbing, the data is no longer `source(T)` for the specified tags. This is how IPC channels cross trust boundaries without creating trifecta.
-
-**Defense layers** (`de_taints: false`): `instruction_strip`, `delimiter`, `canary`. These reduce injection risk without changing classification. A heuristic regex can't catch all injection phrasings, so the taint analysis doesn't trust them to break the chain.
-
-The agent specifies scrubbers per-IPC-target in its policy proposal:
+IPC channels can enforce a JSON schema on every message. The `schema_enforcer` scrubber rejects messages that don't conform:
 
 ```yaml
 allowed_ipc_targets:
   - policy_name: "processor_*"
     scrub_egress:
-      scrubber: field_pii
+      scrubber: schema_enforcer
       data_types: [pii]
-      de_taints: true
       config:
-        fields: ["$.email", "$.ssn", "$.phone"]
-        action: redact
+        schema:
+          type: object
+          properties:
+            query: {type: string, maxLength: 200}
+            results: {type: array}
+          required: [query, results]
+          additionalProperties: false
 ```
 
-This means: "I want to talk to processor policies, and when I send data, scrub these PII fields first." The operator sees this in the proposal and can verify the scrubber coverage matches the data sensitivity.
+A process can't inject unexpected fields, send oversized payloads, or change the message structure. The receiving process only sees data in the shape it declared. This constrains the attack surface — even if a process is compromised, its IPC output is structurally confined.
+
+### PII Scrubbing
+
+IPC channels can strip PII from messages before they cross a trust boundary. The agent specifies which fields to scrub and how:
+
+```yaml
+allowed_ipc_targets:
+  - policy_name: "init_v0"
+    scrub_egress:
+      scrubber: field_pii
+      data_types: [pii]
+      config:
+        fields: ["$.email", "$.ssn", "$.phone", "$.address"]
+        action: redact   # or: hash (deterministic, joinable)
+```
+
+The receiving process sees `[REDACTED]` where the SSN was. It can reason about the data ("Sarah Chen has a balance of $84,230") without ever seeing the raw PII. Even if the receiving process is fully compromised — jailbroken LLM, injected prompt, whatever — it cannot exfiltrate data it never received.
+
+For natural language PII (names, addresses in free text), the `ner_pii` scrubber calls an NER model (Presidio) to detect and redact entities that regex would miss.
+
+### Injection Defense
+
+Content from untrusted sources (web pages, emails, user messages) can carry prompt injection. IPC scrubbers defend against this:
+
+- **`instruction_strip`** removes known injection patterns (chat markers, role prefixes, invisible Unicode, base64 instruction blocks)
+- **`delimiter`** wraps untrusted content in boundary tags with a random nonce, making the trust boundary explicit in the token stream
+- **`canary`** injects tracking tokens into untrusted content on ingress, then detects them in outbound messages on egress — catching exfiltration attempts
+
+These are defense-in-depth layers. They reduce injection risk but don't eliminate it — a sufficiently creative injection can bypass heuristic patterns. The structural defense (the process that handles untrusted content doesn't have access to sensitive data) is what provides the hard guarantee.
+
+### Mutual Consent
+
+IPC is bidirectional by default but requires **mutual consent**. Both policies must list each other in `allowed_ipc_targets`. A compromised process can't unilaterally open a channel to a process it shouldn't talk to. The operator sees the full IPC graph in the taint dashboard and can verify that only intended channels exist.
 
 ## The Init Coordinator Pattern
 
