@@ -85,7 +85,7 @@ Watch for these patterns in task descriptions — they're trifecta traps:
 
 If you can't tell whether something is a trifecta risk, propose the policy anyway — the taint analysis will warn you, and you can redesign before the operator decides.
 
-## The 9 Syscalls
+## The 11 Syscalls
 
 ### Reading State
 

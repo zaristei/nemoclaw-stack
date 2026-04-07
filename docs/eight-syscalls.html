@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Nine Syscalls for an AI Agent Sandbox</title>
+<title>Eleven Syscalls for an AI Agent Sandbox</title>
 <link href="https://fonts.googleapis.com/css2?family=Crimson+Pro:ital,wght@0,400;0,500;0,600;0,700;1,400;1,500&family=DM+Mono:wght@400;500&display=swap" rel="stylesheet">
 <style>
   :root {
@@ -272,7 +272,7 @@
 
 <header class="post-header">
   <div class="post-meta">Architecture Notes &middot; April 2026</div>
-  <h1>Nine Syscalls for an AI Agent Sandbox</h1>
+  <h1>Eleven Syscalls for an AI Agent Sandbox</h1>
   <p class="post-subtitle">Reasoning from Linux kernel primitives to a minimal, complete API for an agentic AI runtime &mdash; and discovering along the way why the kernel has so many syscalls.</p>
 </header>
 
@@ -338,7 +338,7 @@
 <!-- =============================== SYSCALLS =============================== -->
 
 <div class="divider"></div>
-<h2>The Nine Syscalls</h2>
+<h2>The Eleven Syscalls</h2>
 
 <div class="syscall-card net">
   <h3>1. http_request</h3>
@@ -397,6 +397,18 @@
   <div class="sig">revoke_policy(policy_name: str, workflow_token: str) &rarr; { ack: bool, affected: int } | EPERM</div>
   <p>Removes a policy from the approved set and propagates to all affected workflows. Hard revoke kills all processes running as affected UIDs and tears down their resources. Soft revoke recomputes the effective policy without the revoked one &mdash; in-flight requests to revoked-only endpoints start getting denied.</p>
   <p>Revocation is strictly a reduction of capability. The agent cannot escalate by revoking. The operator can also revoke directly via the Telegram approval channel without involving the agent.</p>
+</div>
+
+<div class="syscall-card info">
+  <h3>10. policy_list</h3>
+  <div class="sig">policy_list(workflow_token: str) &rarr; [{ policy_name, rationale }]</div>
+  <p>Returns names and rationales of all approved policies visible to the caller. Visibility is scoped by <code>allowed_ipc_targets</code> &mdash; you only see policies whose names match your IPC target patterns, plus your own. Init (with wildcard targets) sees everything. This enables the proactive capability acquisition loop: check what exists before proposing new policies.</p>
+</div>
+
+<div class="syscall-card info">
+  <h3>11. policy_get</h3>
+  <div class="sig">policy_get(policy_name: str, workflow_token: str) &rarr; MediationPolicy | ENOENT</div>
+  <p>Returns the full configuration of a specific policy if it exists and is visible to the caller. Use this to inspect a policy's HTTP allowlist, mounts, IPC targets, and scrubber configs before deciding to fork a child with it. Same visibility rules as <code>policy_list</code>.</p>
 </div>
 
 <div class="callout">
