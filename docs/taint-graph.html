@@ -1,0 +1,157 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>Taint Graph — Honeypot Deployment</title>
+<script src="https://unpkg.com/vis-network/standalone/umd/vis-network.min.js"></script>
+<style>
+  body { font-family: system-ui, sans-serif; margin: 0; background: #0d1117; color: #c9d1d9; }
+  #header { padding: 12px 20px; background: #161b22; border-bottom: 1px solid #30363d; }
+  #header h2 { margin: 0; font-size: 16px; font-weight: 500; }
+  #header p { margin: 4px 0 0; font-size: 12px; color: #8b949e; }
+  #container { display: flex; height: calc(100vh - 70px); }
+  #graph { flex: 1; }
+  #detail { width: 340px; padding: 16px; overflow-y: auto; border-left: 1px solid #30363d; background: #161b22; font-size: 13px; }
+  #detail h3 { margin-top: 0; }
+  .tag-clean { color: #3fb950; }
+  .tag-partial { color: #d29922; }
+  .tag-trifecta { color: #f85149; }
+  pre { background: #0d1117; padding: 8px; border-radius: 4px; overflow-x: auto; font-size: 11px; white-space: pre-wrap; }
+  .legend { font-size: 11px; color: #8b949e; margin-top: 12px; padding-top: 12px; border-top: 1px solid #30363d; }
+  .legend span { display: inline-block; width: 10px; height: 10px; border-radius: 2px; margin-right: 4px; vertical-align: middle; }
+</style>
+</head>
+<body>
+<div id="header">
+  <h2>Mediator Taint Graph — Honeypot Deployment</h2>
+  <p>4 policies | 4 active workflows | Trust spec: pii, credentials, financial, internal, web_content</p>
+</div>
+<div id="container">
+  <div id="graph"></div>
+  <div id="detail">
+    <h3>Policy Taint Dashboard</h3>
+    <p>Click a node to see its per-tag taint classification and IPC scrubber config.</p>
+    <div class="legend">
+      <p><span style="background:#3fb950"></span> Clean — 0-1 trifecta legs. Safe.</p>
+      <p><span style="background:#d29922"></span> Partial — 2 legs. One more = violation.</p>
+      <p><span style="background:#f85149"></span> Trifecta — all 3 legs for same data type.</p>
+      <p>Solid edge = scrubbed IPC (de_taints). Dashed = raw.</p>
+    </div>
+  </div>
+</div>
+<script>
+// Baked-in graph data from the live honeypot deployment
+const policies = [
+  {
+    name: "init_v0",
+    color: "#3fb950",
+    trifecta: false,
+    tags: {pii: {src:false, untrust:false, sink:false}, credentials: {src:false, untrust:false, sink:false}},
+    mounts: [],
+    http: [],
+    ipc_targets: ["*"],
+    rationale: "Root coordinator — inference only. No data access, no untrusted HTTP.",
+    workflows: 0,
+  },
+  {
+    name: "customer_reader_v1",
+    color: "#d29922",
+    trifecta: false,
+    tags: {pii: {src:true, untrust:false, sink:false}},
+    mounts: ["/sandbox/data/customers.json (r)"],
+    http: [],
+    ipc_targets: ["init_v0"],
+    scrub_egress: "field_pii ($.email, $.ssn, $.phone, $.address → [REDACTED])",
+    rationale: "Reads customer records. PII scrubbed on egress.",
+    workflows: 1,
+  },
+  {
+    name: "email_reader_v1",
+    color: "#d29922",
+    trifecta: false,
+    tags: {pii: {src:true, untrust:false, sink:false}, internal: {src:true, untrust:false, sink:false}},
+    mounts: ["/sandbox/data/email (r)"],
+    http: [],
+    ipc_targets: ["init_v0"],
+    scrub_egress: "field_pii ($.from, $.to, $.body → [REDACTED])",
+    rationale: "Reads email inbox. Injection stripped, PII scrubbed on egress.",
+    workflows: 2,
+  },
+  {
+    name: "financial_monitor_v1",
+    color: "#d29922",
+    trifecta: false,
+    tags: {pii: {src:true, untrust:false, sink:false}, financial: {src:true, untrust:false, sink:false}},
+    mounts: ["/sandbox/data/financial (r)"],
+    http: [],
+    ipc_targets: ["init_v0"],
+    scrub_egress: "regex_pii (SSN, email, phone, CC → [REDACTED])",
+    rationale: "Monitors transactions. PII scrubbed on egress.",
+    workflows: 1,
+  },
+];
+
+const container = document.getElementById('graph');
+
+const nodes = policies.map(p => ({
+  id: p.name,
+  label: p.name + (p.workflows > 0 ? ` (${p.workflows})` : ''),
+  color: { background: p.color, border: '#30363d', highlight: { background: p.color, border: '#c9d1d9' } },
+  font: { color: '#c9d1d9', size: 14 },
+  shape: 'box',
+  borderWidth: 2,
+  margin: 12,
+}));
+
+const edges = [];
+policies.forEach(p => {
+  if (p.ipc_targets) {
+    p.ipc_targets.forEach(target => {
+      const matches = policies.filter(t => {
+        if (target === '*') return t.name !== p.name;
+        return t.name === target || t.name.startsWith(target.replace('*',''));
+      });
+      matches.forEach(t => {
+        edges.push({
+          from: p.name, to: t.name,
+          arrows: 'to',
+          color: { color: p.scrub_egress ? '#3fb950' : '#8b949e' },
+          dashes: !p.scrub_egress,
+          width: p.scrub_egress ? 2 : 1,
+          title: p.scrub_egress || 'raw (no scrubber)',
+        });
+      });
+    });
+  }
+});
+
+const network = new vis.Network(container, { nodes, edges }, {
+  physics: { solver: 'forceAtlas2Based', forceAtlas2Based: { gravitationalConstant: -100 } },
+  layout: { improvedLayout: true },
+  interaction: { hover: true },
+});
+
+network.on('click', params => {
+  if (!params.nodes.length) return;
+  const name = params.nodes[0];
+  const p = policies.find(x => x.name === name);
+  if (!p) return;
+  const detail = document.getElementById('detail');
+  let html = `<h3>${name}</h3>`;
+  html += `<p style="color:${p.color}">${p.trifecta ? '⚠ TRIFECTA' : '✓ Clean'}</p>`;
+  html += `<p>${p.rationale}</p>`;
+  html += `<p><b>Workflows:</b> ${p.workflows} | <b>Mounts:</b> ${p.mounts.length}</p>`;
+  if (p.mounts.length) html += `<pre>${p.mounts.join('\n')}</pre>`;
+  if (p.http.length) html += `<p><b>HTTP:</b></p><pre>${p.http.join('\n')}</pre>`;
+  if (p.scrub_egress) html += `<p><b>IPC egress scrubber:</b></p><pre>${p.scrub_egress}</pre>`;
+  html += `<p><b>Per-tag taint:</b></p>`;
+  Object.entries(p.tags).forEach(([tag, t]) => {
+    const legs = [t.src && 'source', t.untrust && 'untrusted', t.sink && 'sink'].filter(Boolean);
+    const cls = legs.length >= 3 ? 'tag-trifecta' : legs.length >= 1 ? 'tag-partial' : 'tag-clean';
+    html += `<p class="${cls}"><b>${tag}:</b> ${legs.length ? legs.join(' + ') : 'clean'}</p>`;
+  });
+  detail.innerHTML = html;
+});
+</script>
+</body>
+</html>
