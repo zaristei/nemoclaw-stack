@@ -631,6 +631,18 @@ cmd_create() {
         fi
     done
 
+    # ── Upload mediator-file wrapper ─────────────────────────────────────
+    # Shell wrapper that reads JSON params from a file instead of argv,
+    # sidestepping the exec tool's JSON-escaping issues. Agent writes JSON
+    # with its file tool (no escaping), then execs mediator-file <method> /tmp/params.json.
+    local mediator_file_src="${SCRIPT_DIR}/scripts/sandbox-tools/mediator-file"
+    if [[ -f "$mediator_file_src" ]]; then
+        openshell sandbox upload "$sandbox_name" "$mediator_file_src" "/sandbox/" \
+            && openshell sandbox exec -n "$sandbox_name" -- chmod +x /sandbox/mediator-file \
+            && log "mediator-file wrapper uploaded to /sandbox/mediator-file" \
+            || log "Warning: mediator-file upload failed"
+    fi
+
     # ── Start mediator daemon inside sandbox ──────────────────────────────
     # nemoclaw-start.sh's start_mediator_daemon runs at sandbox boot, BEFORE
     # we get a chance to upload these binaries. So the boot-time daemon start

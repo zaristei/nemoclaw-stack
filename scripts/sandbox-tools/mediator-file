@@ -1,0 +1,16 @@
+#!/bin/sh
+# Wrapper: read JSON params from a file instead of argv.
+# Usage: mediator-file <method> <json-file>
+#   mediator-file policy_propose /tmp/proposal.json
+#   mediator-file fork_with_policy /tmp/fork.json
+method="$1"
+params_file="${2:-}"
+if [ -z "$method" ]; then
+  echo "Usage: mediator-file <method> [json-file]" >&2
+  exit 1
+fi
+if [ -z "$params_file" ]; then
+  exec /sandbox/mediator-cli "$method"
+else
+  exec /sandbox/mediator-cli "$method" "$(cat "$params_file")"
+fi
