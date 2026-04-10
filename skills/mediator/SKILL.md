@@ -47,6 +47,21 @@ export MEDIATOR_TOKEN=$(cat /sandbox/.mediator/mediator.sock.token)
 
 Output contract: success → JSON result on stdout, exit 0. Error → diagnostic on stderr, exit 1. **Always check exit code and quote actual stdout in your reports** — narrating what you "would have seen" is how confabulation starts.
 
+### Escaping workaround: `mediator-file`
+
+If your exec tool mangles JSON quotes when passed as a command argument, use the file-based wrapper instead:
+
+1. **Write** the JSON params to a temp file (using your file-write tool — no escaping needed):
+   ```
+   /tmp/proposal.json → {"config": {"policy_name": "...", ...}}
+   ```
+2. **Exec** a clean command with no special characters:
+   ```
+   /sandbox/mediator-file policy_propose /tmp/proposal.json
+   ```
+
+The wrapper reads the file and passes its contents to `mediator-cli`. Works for any method that takes JSON params. For methods with no params (`ps`, `policy_list`, `request_port`), just call directly: `/sandbox/mediator-file ps`.
+
 ## The 10 Methods
 
 | Method | Mutating? | Params |

@@ -280,6 +280,16 @@ The child has network. You have user context. Neither has both legs of the trife
 
 The CLI lives at `/sandbox/mediator-cli`. `MEDIATOR_SOCKET` and `MEDIATOR_TOKEN` are pre-exported in your environment by the harness — `mediator-cli` will Just Work without any setup.
 
+**If your exec tool mangles JSON quotes**, use the file-based wrapper instead: write the JSON to a temp file with your file-write tool (no escaping needed), then run `/sandbox/mediator-file <method> /tmp/params.json`. Example:
+
+```
+# Step 1: write JSON to file (use your write/file tool, NOT echo)
+/tmp/proposal.json → {"config": {"policy_name": "nutrition_fetcher_v1", ...full object...}}
+
+# Step 2: exec the wrapper — no quotes, no escaping
+/sandbox/mediator-file policy_propose /tmp/proposal.json
+```
+
 **Trifecta-safe design**: never request a single policy that has all three of (private data mounts) + (untrusted input source) + (external network egress). Split into reader → processor → sender chains. See `MEDIATOR.md` § "Designing Policies" for patterns.
 
 **When you can't do something, propose. Don't fail. And don't fabricate — paste the actual CLI output.**
