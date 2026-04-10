@@ -214,35 +214,72 @@ This is a starting point. Add your own conventions, style, and rules as you figu
 
 ## 🛡️ Mediator Syscalls — Your Real Capabilities
 
-You are running inside an OpenShell sandbox under a mediated policy. Most things you'd reach for as "tools" — web fetch, network sockets, sensitive file mounts, talking to other agents — are gated by policy, not absent. **Read `MEDIATOR.md` in this workspace at session start.** It's the full syscall guide.
+You are running inside an OpenShell sandbox under a mediated policy. Most things you'd reach for as "tools" — web fetch, network sockets, sensitive file mounts, talking to other agents — are gated by policy, not absent.
 
-The most important rule:
+**Critical mental model:** mediator syscalls are NOT tools in your LLM tool registry. They are SHELL COMMANDS. You invoke them by running `/sandbox/mediator-cli <method> '<json-params>'` via your shell/exec tool, the same way you'd run `ls` or `cat`. If you look for "policy_propose" in your tool list and don't find it, that does not mean it's unavailable — it means you need to invoke it via shell. Always try the shell command first before declaring a capability missing.
+
+**The most important rule:**
 
 > When you hit "I can't do X because the tool isn't configured / I don't have permission," your **first move is to propose a child workflow with the right policy and fork it** — not to give up.
 
-Example: user asks for live web data. You don't need a Brave key in your own environment. Instead:
+**Authoritative reference:** Read `MEDIATOR.md` in this workspace at session start, and the loaded `mediator` skill (`/sandbox/.openclaw-data/skills/mediator/SKILL.md`) for the complete CLI surface. Both are kept in sync with the daemon. The example below is just enough to get started — when in doubt, defer to those.
 
-1. `mediator-cli policy_propose --name web_fetcher_v1 --http-allowlist "https://*.brave.com/*" --ipc-target "$(mediator-cli whoami)"`
-2. Wait for operator approval (Telegram bridge if configured, auto-approve in dev).
-3. `mediator-cli fork_with_policy --policy web_fetcher_v1`
-4. The child runs with its own UID, makes the network call, and IPCs the result back to you.
+**The CLI takes JSON, not flags.** Every method takes one JSON-object argument (or no argument for `ps` / `policy_list`). Do not invent flag-style invocations like `--name foo --http-allowlist ...` — they don't exist and the CLI will reject them.
 
-The child has network. You have user context and sensitive data. Neither has both legs of the trifecta (private data + untrusted content + external comms), so the lethal trifecta is preserved.
+```bash
+# Discover
+/sandbox/mediator-cli ps
+/sandbox/mediator-cli policy_list
+
+# Propose a new child policy (round-trips through the operator approval bridge)
+/sandbox/mediator-cli policy_propose '{
+  "config": {
+    "policy_name": "web_fetcher_v1",
+    "rationale": "User asked for live web data; child needs Brave Search egress.",
+    "http_allowlist": ["https://api.search.brave.com/*"],
+    "external_mounts": [],
+    "allowed_child_policies": [],
+    "bind_ports": null,
+    "allowed_ipc_targets": ["init"],
+    "allowed_signal_targets": []
+  }
+}'
+
+# Fork a child under the approved policy
+/sandbox/mediator-cli fork_with_policy '{
+  "workflow_id": "web_fetch_1",
+  "policy_name": "web_fetcher_v1",
+  "inherit": false
+}'
+
+# Send the child a request
+/sandbox/mediator-cli ipc_send '{
+  "target_workflow_id": "web_fetch_1",
+  "message": {"action": "fetch", "url": "https://api.search.brave.com/res/v1/web/search?q=..."}
+}'
+```
+
+The child has network. You have user context. Neither has both legs of the trifecta (private data + untrusted content + external comms), so the lethal trifecta is preserved.
+
+**Output contract:** success → JSON result on stdout, exit 0. Error → diagnostic on stderr, exit 1. **Always check exit code and quote the actual stdout/stderr in your reports.** Narrating what you "would have seen" is how confabulation starts and the operator will catch it via the audit log.
 
 **Core syscalls** (full reference in `MEDIATOR.md`):
 
-| Syscall | What it does |
-|---|---|
-| `policy_propose` | Request a new child policy (operator-approved) |
-| `policy_list` / `policy_get` | Inspect existing policies |
-| `fork_with_policy` | Spawn a child workflow under a named policy |
-| `ipc_send` / `ipc_connect` | Talk to other workflows (one-shot or streaming) |
-| `ps` | Discover other live workflows you're allowed to see |
-| `request_port` | Allocate a port from your bind range |
-| `signal` | term/kill/stop/cont a workflow you control |
+| Syscall | Params | What it does |
+|---|---|---|
+| `ps` | none | Discover live workflows you can see |
+| `policy_list` | none | List approved policies you can fork |
+| `policy_get` | `{"policy_name": "..."}` | Inspect one policy |
+| `policy_propose` | `{"config": <full MediationPolicy>}` | Request a new policy (operator-approved) |
+| `fork_with_policy` | `{"workflow_id": "...", "policy_name": "...", "inherit": false}` | Spawn a child |
+| `ipc_send` | `{"target_workflow_id": "...", "message": {...}}` | One-shot send |
+| `ipc_connect` | `{"target_workflow_id": "..."}` | Bidirectional stream |
+| `signal` | `{"target_workflow_id": "...", "signal": "term"}` | term/kill/stop/cont |
+| `request_port` | none | Allocate a port from your bind range |
+| `revoke_policy` | `{"policy_name": "...", "hard": true}` | Destroy a policy |
 
-The CLI lives at `/sandbox/mediator-cli`. The socket is at `$MEDIATOR_SOCKET` and your token at `$MEDIATOR_TOKEN`, both already exported in your shell.
+The CLI lives at `/sandbox/mediator-cli`. `MEDIATOR_SOCKET` and `MEDIATOR_TOKEN` are pre-exported in your environment by the harness — `mediator-cli` will Just Work without any setup.
 
 **Trifecta-safe design**: never request a single policy that has all three of (private data mounts) + (untrusted input source) + (external network egress). Split into reader → processor → sender chains. See `MEDIATOR.md` § "Designing Policies" for patterns.
 
-**When you can't do something, propose. Don't fail.**
+**When you can't do something, propose. Don't fail. And don't fabricate — paste the actual CLI output.**
