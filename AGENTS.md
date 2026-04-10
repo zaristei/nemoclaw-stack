@@ -59,7 +59,7 @@ The mediator is a UDS-based syscall mediation layer with 10 syscalls, per-data-t
 - **mediator-daemon**: standalone Rust binary, runs inside the sandbox container alongside the OpenClaw gateway.
 - **mediator-cli**: shell tool for agents to call mediator syscalls from bash.
 - Both binaries require the `mediator-tools` cargo feature: `cargo build --features mediator-tools --bin mediator-cli --bin mediator-daemon`.
-- Socket: `/run/openshell/mediator.sock`, DB: SQLite, Token: `/run/openshell/mediator.sock.token`.
+- Socket: `/sandbox/.mediator/mediator.sock`, DB: `/sandbox/.mediator/mediator.db`, Token: `/sandbox/.mediator/mediator.sock.token`. (Sandbox-writable so the daemon can be started post-boot as the sandbox user.)
 
 ### 10 Syscalls
 
@@ -93,11 +93,11 @@ The mediator is a UDS-based syscall mediation layer with 10 syscalls, per-data-t
 
 ### Init Policy
 
-Init (the coordinator) has no HTTP access except the inference endpoint (configured via `INIT_INFERENCE_ENDPOINT`). No sensitive mounts, no bind_ports. Can fork any child policy, IPC with any workflow, signal any workflow. All mutating syscalls require human approval when the approval bridge is configured.
+Init (the coordinator) has no HTTP access except the inference endpoint (configured via `INIT_INFERENCE_ENDPOINT`). No sensitive mounts, no bind_ports. Can fork any child policy, IPC with any workflow, signal any workflow. Init's syscalls do not require per-call operator approval — the only operator gate is `policy_propose`, where new capabilities are actually being requested.
 
 ### NemoClaw Integration
 
-The mediator-daemon is started by `nemoclaw-start.sh` (NemoClaw's container entrypoint) before the gateway. It writes `MEDIATOR_SOCKET` and `MEDIATOR_TOKEN` to the sandbox user's bashrc/profile. The `mediator-cli` binary is uploaded to `/sandbox/mediator-cli` during `stack.sh create`.
+`nemoclaw-start.sh` (NemoClaw's container entrypoint) is the canonical mediator launcher when the binary is baked into the image. In the current dev flow the binary is uploaded *after* boot, so `stack.sh create` is the one that actually starts the daemon (post-upload, as the sandbox user) and injects `MEDIATOR_SOCKET`/`MEDIATOR_TOKEN` into the agent's bashrc/profile. The `mediator-cli` binary is uploaded to `/sandbox/mediator-cli` during `stack.sh create`.
 
 ### Cross-Compilation
 

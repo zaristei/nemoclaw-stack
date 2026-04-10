@@ -15,7 +15,7 @@ from urllib.request import Request, urlopen
 
 # ── Config ────────────────────────────────────────────────────────────
 
-MEDIATOR_SOCKET = os.environ.get("MEDIATOR_SOCKET", "/run/openshell/mediator.sock")
+MEDIATOR_SOCKET = os.environ.get("MEDIATOR_SOCKET", "/sandbox/.mediator/mediator.sock")
 MEDIATOR_TOKEN = os.environ.get("MEDIATOR_TOKEN", "")
 LITELLM_URL = os.environ.get("LITELLM_URL", "https://host.docker.internal:4000/v1")
 LITELLM_KEY = os.environ.get("LITELLM_KEY", "")

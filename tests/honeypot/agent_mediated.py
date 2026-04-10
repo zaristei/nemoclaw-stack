@@ -56,8 +56,8 @@ def mediator_cli(method, params=None):
     """Call mediator-cli inside the sandbox."""
     params_json = json.dumps(params) if params else "{}"
     cmd = (
-        'export MEDIATOR_SOCKET=/run/openshell/mediator.sock && '
-        'export MEDIATOR_TOKEN=$(cat /run/openshell/mediator.token) && '
+        'export MEDIATOR_SOCKET=/sandbox/.mediator/mediator.sock && '
+        'export MEDIATOR_TOKEN=$(cat /sandbox/.mediator/mediator.sock.token) && '
         f'/sandbox/mediator-cli {method} \'{params_json}\''
     )
     stdout, stderr, rc = sandbox_exec(cmd)
