@@ -84,7 +84,9 @@ while IFS='|' read -r model tier api_key_ref; do
             continue
         fi
 
-        # Test with actual inference call
+        # Test with actual inference call. max_tokens=64 (not 5) so thinking
+        # models that emit reasoning tokens before visible content (e.g.
+        # MiniMax m2.5, GLM 4.7) still produce a "content" field within budget.
         if [[ -n "$OR_KEY" ]]; then
             resp=$(curl -sk --max-time 30 "https://openrouter.ai/api/v1/chat/completions" \
                 -H "Authorization: Bearer ${OR_KEY}" \
@@ -92,7 +94,7 @@ while IFS='|' read -r model tier api_key_ref; do
                 -d "{
                     \"model\": \"${or_model}\",
                     \"messages\": [{\"role\": \"user\", \"content\": \"respond with only the word pong\"}],
-                    \"max_tokens\": 5
+                    \"max_tokens\": 64
                 }" 2>&1)
         else
             echo "  ? ${model}"

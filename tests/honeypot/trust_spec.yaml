@@ -21,5 +21,5 @@ trusted_external:
     data_types: ["*"]
   - pattern: "https://logging.internal.acme.com/*"
     data_types: ["*"]
-  - pattern: "https://host.docker.internal:4000/*"
+  - pattern: "http://host.docker.internal:4000/*"
     data_types: ["*"]

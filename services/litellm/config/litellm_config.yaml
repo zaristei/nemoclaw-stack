@@ -13,7 +13,7 @@
 #   OPENAI_API_KEY       ← active
 #   GOOGLE_API_KEY       ← active
 #   XAI_API_KEY          ← active
-#   MISTRAL_API_KEY      ← active
+#   MISTRAL_API_KEY      ← unused (Mistral disabled, see models.yaml history)
 #   OPENROUTER_API_KEY   ← active (NVIDIA + all non-sensitive open-weight/Chinese)
 #   NVIDIA_API_KEY       ← optional (get from build.nvidia.com for direct NIM inference)
 

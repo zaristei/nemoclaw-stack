@@ -17,7 +17,8 @@
 - azure
 - amazon-bedrock
 - amazon-nova
-- mistral
+# - mistral  # disabled: Mistral API enforces a 9-char tool_call_id constraint
+#   that's incompatible with Anthropic/OpenAI-style agent tool calling.
 - cohere
 - xai
 - groq

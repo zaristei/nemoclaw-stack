@@ -54,12 +54,6 @@ model_list:
       model: xai/grok-4.20                           # verified 2026-04-06
       api_key: os.environ/XAI_API_KEY
 
-  - &opus-mistral
-    model_name: tier-opus-sensitive
-    litellm_params:
-      model: mistral/mistral-large-latest
-      api_key: os.environ/MISTRAL_API_KEY
-
   # - &opus-nvidia                                        # PENDING: Nemotron 3 Ultra (550B/55B active)
   #   model_name: tier-opus-sensitive                    # announced GTC 2026, expected H1 2026
   #   litellm_params:
@@ -81,9 +75,6 @@ model_list:
     model_name: tier-opus-nonsensitive
 
   - <<: *opus-xai
-    model_name: tier-opus-nonsensitive
-
-  - <<: *opus-mistral
     model_name: tier-opus-nonsensitive
 
   # <<: *opus-nvidia — omitted until Nemotron 3 Ultra is available
@@ -131,12 +122,6 @@ model_list:
       model: xai/grok-4.20                           # verified 2026-04-06
       api_key: os.environ/XAI_API_KEY
 
-  - &sonnet-mistral
-    model_name: tier-sonnet-sensitive
-    litellm_params:
-      model: mistral/mistral-small-2603              # Mistral Small 4 — Mar 2026
-      api_key: os.environ/MISTRAL_API_KEY
-
   - &sonnet-nvidia
     model_name: tier-sonnet-sensitive
     litellm_params:
@@ -163,9 +148,6 @@ model_list:
     model_name: tier-sonnet-nonsensitive
 
   - <<: *sonnet-xai
-    model_name: tier-sonnet-nonsensitive
-
-  - <<: *sonnet-mistral
     model_name: tier-sonnet-nonsensitive
 
   - <<: *sonnet-nvidia
@@ -219,12 +201,6 @@ model_list:
       model: xai/grok-4-fast                         # verified 2026-04-06
       api_key: os.environ/XAI_API_KEY
 
-  - &haiku-mistral
-    model_name: tier-haiku-sensitive
-    litellm_params:
-      model: mistral/mistral-small-2603              # Mistral Small 4 — Mar 2026
-      api_key: os.environ/MISTRAL_API_KEY
-
   # - &haiku-nvidia                                        # PENDING: Nemotron 3 Nano (30B/3.2B active)
   #   model_name: tier-haiku-sensitive                    # released GTC 2026, not yet on OpenRouter
   #   litellm_params:
@@ -246,9 +222,6 @@ model_list:
     model_name: tier-haiku-nonsensitive
 
   - <<: *haiku-xai
-    model_name: tier-haiku-nonsensitive
-
-  - <<: *haiku-mistral
     model_name: tier-haiku-nonsensitive
 
   # <<: *haiku-nvidia — omitted until Nemotron 3 Nano is on OpenRouter
@@ -275,5 +248,5 @@ model_list:
 
   - model_name: tier-haiku-nonsensitive
     litellm_params:
-      model: openrouter/minimax/minimax-m2.5:free    # MiniMax free tier
+      model: openrouter/minimax/minimax-m2.5         # MiniMax M2.5 (paid; thinking model)
       api_key: os.environ/OPENROUTER_API_KEY

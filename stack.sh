@@ -9,8 +9,8 @@
 #
 # Environment:
 #   STACK_ROOT              Storage root (default: /Volumes/macmini1)
-#   NEMOCLAW_MODEL          Model for NemoClaw inference (default: tier-haiku-sensitive)
-#   NEMOCLAW_ENDPOINT       LiteLLM endpoint URL (default: https://host.docker.internal:4000/v1)
+#   NEMOCLAW_MODEL          Model for NemoClaw inference (default: tier-sonnet-sensitive)
+#   NEMOCLAW_ENDPOINT       LiteLLM endpoint URL (default: http://host.docker.internal:4000/v1)
 #   NEMOCLAW_SANDBOX_NAME   Sandbox name (default: my-assistant)
 #   NEMOCLAW_POLICY_MODE    Policy preset mode: suggested, custom, skip (default: suggested)
 #   NEMOCLAW_POLICY_PRESETS Comma-separated preset names (used with NEMOCLAW_POLICY_MODE=custom)
@@ -171,11 +171,11 @@ cmd_health() {
         exit 1
     fi
 
-    local base="https://localhost:4000"
+    local base="http://localhost:4000"
 
     echo "=== LiteLLM proxy ==="
-    if curl -sfk --max-time 5 "${base}/health/liveliness" -H "Authorization: Bearer ${key}" >/dev/null 2>&1; then
-        echo "  :4000 sensitive:    healthy (HTTPS)"
+    if curl -sf --max-time 5 "${base}/health/liveliness" -H "Authorization: Bearer ${key}" >/dev/null 2>&1; then
+        echo "  :4000 sensitive:    healthy (HTTP)"
     else
         echo "  :4000 sensitive:    unreachable"
         echo ""
@@ -184,7 +184,7 @@ cmd_health() {
     fi
 
     if curl -sfk --max-time 5 "https://localhost:4001/health/liveliness" -H "Authorization: Bearer ${key}" >/dev/null 2>&1; then
-        echo "  :4001 nonsensitive: healthy (HTTPS → :4000)"
+        echo "  :4001 nonsensitive: healthy (HTTPS → HTTP :4000)"
     else
         echo "  :4001 nonsensitive: not running (socat redirect)"
     fi
@@ -334,24 +334,24 @@ elif isinstance(data, dict):
     echo ""
     echo "=== Docker network (host.docker.internal) ==="
 
-    # Sensitive endpoint (:4000)
-    if docker run --rm alpine sh -c "apk add --no-cache curl >/dev/null 2>&1 && curl -sfk --max-time 5 https://host.docker.internal:4000/health -H 'Authorization: Bearer ${key}'" >/dev/null 2>&1; then
-        echo "  :4000 sensitive:    reachable (HTTPS)"
+    # Sensitive endpoint (:4000) — plain HTTP, see comment in cmd_start.
+    if docker run --rm alpine sh -c "apk add --no-cache curl >/dev/null 2>&1 && curl -sf --max-time 5 http://host.docker.internal:4000/health -H 'Authorization: Bearer ${key}'" >/dev/null 2>&1; then
+        echo "  :4000 sensitive:    reachable (HTTP)"
     else
-        if docker run --rm alpine sh -c "apk add --no-cache curl >/dev/null 2>&1 && curl -sko /dev/null -w '%{http_code}' --max-time 5 https://host.docker.internal:4000/health" 2>/dev/null | grep -qE '^[2-4]'; then
-            echo "  :4000 sensitive:    reachable (HTTPS)"
+        if docker run --rm alpine sh -c "apk add --no-cache curl >/dev/null 2>&1 && curl -so /dev/null -w '%{http_code}' --max-time 5 http://host.docker.internal:4000/health" 2>/dev/null | grep -qE '^[2-4]'; then
+            echo "  :4000 sensitive:    reachable (HTTP)"
         else
             echo "  :4000 sensitive:    unreachable"
             all_ok=false
         fi
     fi
 
-    # Nonsensitive redirect (:4001)
+    # Nonsensitive redirect (:4001) — HTTPS terminator forwarding to HTTP :4000.
     if docker run --rm alpine sh -c "apk add --no-cache curl >/dev/null 2>&1 && curl -sfk --max-time 5 https://host.docker.internal:4001/health -H 'Authorization: Bearer ${key}'" >/dev/null 2>&1; then
-        echo "  :4001 nonsensitive: reachable (HTTPS → :4000)"
+        echo "  :4001 nonsensitive: reachable (HTTPS → HTTP :4000)"
     else
         if docker run --rm alpine sh -c "apk add --no-cache curl >/dev/null 2>&1 && curl -sko /dev/null -w '%{http_code}' --max-time 5 https://host.docker.internal:4001/health" 2>/dev/null | grep -qE '^[2-4]'; then
-            echo "  :4001 nonsensitive: reachable (HTTPS → :4000)"
+            echo "  :4001 nonsensitive: reachable (HTTPS → HTTP :4000)"
         else
             echo "  :4001 nonsensitive: unreachable (socat may not be running)"
         fi
@@ -419,19 +419,21 @@ cmd_start() {
     if [[ -f "$LITELLM_PID" ]] && kill -0 "$(cat "$LITELLM_PID")" 2>/dev/null; then
         log "LiteLLM already running (pid $(cat "$LITELLM_PID"))"
     else
-        log "Starting LiteLLM proxy (HTTPS)..."
+        log "Starting LiteLLM proxy (HTTP on :4000)..."
         mkdir -p "$(dirname "$LITELLM_LOG")" "$(dirname "$LITELLM_PID")" "$SECRETS_DIR"
         source "${SCRIPT_DIR}/scripts/resolve-secrets.sh"
         # DATABASE_URL for key scoping requires Prisma engine — disabled for now.
         # export DATABASE_URL="sqlite:///${LITELLM_DB_PATH}"
+        # NOTE: 4000 is plain HTTP because openshell-router uses rustls without
+        # native-roots and won't trust our self-signed cert. Hop is loopback
+        # only (Colima gvproxy bridge), never leaves the host. The 4001 socat
+        # below still terminates HTTPS for the nonsensitive tier.
         nohup "$LITELLM_VENV/bin/litellm" \
             --config "$LITELLM_CONFIG" \
             --port 4000 \
-            --ssl_keyfile_path "$LITELLM_KEY" \
-            --ssl_certfile_path "$LITELLM_CERT" \
             > "$LITELLM_LOG" 2>&1 &
         echo $! > "$LITELLM_PID"
-        log "LiteLLM started (pid $!, HTTPS on :4000, log: $LITELLM_LOG)"
+        log "LiteLLM started (pid $!, HTTP on :4000, log: $LITELLM_LOG)"
     fi
 
     # ── LiteLLM: wait for readiness ──────────────────────────────────────
@@ -454,12 +456,15 @@ cmd_start() {
     else
         if command -v socat &>/dev/null; then
             log "Starting nonsensitive inference redirect (:4001 → :4000)..."
+            # Terminate TLS at 4001 (still needed for taint-classification by URL),
+            # forward as plain TCP to 4000 (LiteLLM is HTTP since openshell-router
+            # rustls won't trust the self-signed cert).
             nohup socat \
                 OPENSSL-LISTEN:4001,cert="$LITELLM_CERT",key="$LITELLM_KEY",verify=0,fork,reuseaddr \
-                OPENSSL:localhost:4000,verify=0 \
+                TCP:localhost:4000 \
                 > /dev/null 2>&1 &
             echo $! > "$LITELLM_NONSENSITIVE_PID"
-            log "Nonsensitive redirect started (pid $!, HTTPS :4001 → :4000)"
+            log "Nonsensitive redirect started (pid $!, HTTPS :4001 → HTTP :4000)"
         else
             log "Warning: socat not installed — nonsensitive redirect on :4001 unavailable."
             log "  Children will share the sensitive endpoint on :4000."
@@ -492,11 +497,17 @@ cmd_start() {
         mise exec -- cargo build --release -p openshell-sandbox
     )
     # Build mediator-cli and mediator-daemon separately (requires mediator-tools feature).
-    # These are uploaded to the sandbox, not baked into the cluster image.
-    log "Building mediator-cli + mediator-daemon..."
+    # These are uploaded to the sandbox container (Linux aarch64 musl) — must
+    # be cross-compiled, NOT built for the host (macOS arm64). Without this,
+    # the binaries land inside the sandbox but fail with "Exec format error",
+    # silently — start_mediator_daemon swallows the failure and the daemon
+    # never runs. See AGENTS.md § Cross-Compilation.
+    log "Building mediator-cli + mediator-daemon (aarch64-linux-musl)..."
     (
         cd "${OPENSHELL_DIR}"
-        mise exec -- cargo build --release -p openshell-sandbox --features mediator-tools \
+        mise exec -- cargo zigbuild --release \
+            --target aarch64-unknown-linux-musl \
+            -p openshell-sandbox --features mediator-tools \
             --bin mediator-cli --bin mediator-daemon
     )
 
@@ -505,12 +516,29 @@ cmd_start() {
     # sandbox process can bootstrap it.
     export MEDIATOR_SOCKET="$MEDIATOR_SOCK"
     export MEDIATOR_DB="sqlite://${MEDIATOR_DB}?mode=rwc"
-    export INIT_INFERENCE_ENDPOINT="https://host.docker.internal:4000/*"
-    if [[ -n "${APPROVAL_BOT_TOKEN:-}" ]]; then
-        export APPROVAL_BRIDGE_URL="http://localhost:8090"
-    fi
+    export INIT_INFERENCE_ENDPOINT="http://host.docker.internal:4000/*"
     mkdir -p "$(dirname "$MEDIATOR_SOCK")" "$(dirname "$MEDIATOR_DB")"
     log "Mediator will start embedded in sandbox (socket: $MEDIATOR_SOCK)"
+
+    # ── Approval bridge ─────────────────────────────────────────────────────
+    # Started here so it's already listening when the sandbox boots and the
+    # in-sandbox mediator daemon tries to POST policy proposals to it.
+    # The mediator daemon (running inside the sandbox container) reaches
+    # this bridge via host.docker.internal:8090. Without the bridge running,
+    # the new fail-closed default in policy_propose denies every proposal.
+    if [[ -n "${APPROVAL_BOT_TOKEN:-}" ]]; then
+        if [[ -f "$BRIDGE_PID" ]] && kill -0 "$(cat "$BRIDGE_PID")" 2>/dev/null; then
+            log "Approval bridge already running (pid $(cat "$BRIDGE_PID"))"
+        else
+            log "Starting approval bridge on :8090..."
+            "${SCRIPT_DIR}/services/approval-bridge/start.sh" --bg \
+                && log "Approval bridge started" \
+                || log "Warning: approval bridge start failed"
+        fi
+    else
+        log "APPROVAL_BOT_TOKEN not set — skipping approval bridge"
+        log "  policy_propose will fail-CLOSED until the bridge is configured"
+    fi
 
     # ── OpenShell: build cluster image ──────────────────────────────────────
     log "Building OpenShell cluster image (cached)..."
@@ -526,6 +554,11 @@ cmd_start() {
 cmd_create() {
     export PATH="${CARGO_TARGET_DIR}/release:${PATH}"
 
+    # ── Source root .env for Telegram/Discord/Slack tokens ──────────────────
+    if [[ -f "${SCRIPT_DIR}/.env" ]]; then
+        set -a; source "${SCRIPT_DIR}/.env"; set +a
+    fi
+
     # ── NemoClaw: install dependencies ──────────────────────────────────────
     local lock="${NEMOCLAW_DIR}/node_modules/.package-lock.json"
     if [[ ! -f "$lock" ]] || [[ "${NEMOCLAW_DIR}/package.json" -nt "$lock" ]]; then
@@ -539,12 +572,26 @@ cmd_create() {
     export NEMOCLAW_SKIP_VALIDATE=1
     export NEMOCLAW_ACCEPT_THIRD_PARTY_SOFTWARE=1
     export NEMOCLAW_PROVIDER=custom
-    export NEMOCLAW_ENDPOINT_URL="${NEMOCLAW_ENDPOINT:-https://host.docker.internal:4000/v1}"
-    export NEMOCLAW_MODEL="${NEMOCLAW_MODEL:-tier-haiku-sensitive}"
+    export NEMOCLAW_ENDPOINT_URL="${NEMOCLAW_ENDPOINT:-http://host.docker.internal:4000/v1}"
+    # Default to sonnet tier — haiku is too small for the multi-step tool
+    # chains the mediator skill requires (recognize gap → read SKILL.md →
+    # exec mediator-cli → parse JSON → follow up). Haiku confabulates the
+    # call instead of executing it.
+    export NEMOCLAW_MODEL="${NEMOCLAW_MODEL:-tier-sonnet-sensitive}"
     export NEMOCLAW_SANDBOX_NAME="${NEMOCLAW_SANDBOX_NAME:-my-assistant}"
     export NEMOCLAW_POLICY_MODE="${NEMOCLAW_POLICY_MODE:-suggested}"
     [[ -n "${NEMOCLAW_POLICY_PRESETS:-}" ]] && export NEMOCLAW_POLICY_PRESETS
     export COMPATIBLE_API_KEY="${LITELLM_MASTER_KEY}"
+
+    # Ensure Telegram/Discord/Slack tokens (and DM allowlists) are exported
+    # for the onboard build. onboard.js reads these from process.env to bake
+    # the messaging channel and allowed_ids into the sandbox image.
+    [[ -n "${TELEGRAM_BOT_TOKEN:-}" ]] && export TELEGRAM_BOT_TOKEN
+    [[ -n "${TELEGRAM_ALLOWED_IDS:-}" ]] && export TELEGRAM_ALLOWED_IDS
+    [[ -n "${DISCORD_BOT_TOKEN:-}" ]] && export DISCORD_BOT_TOKEN
+    [[ -n "${DISCORD_ALLOWED_IDS:-}" ]] && export DISCORD_ALLOWED_IDS
+    [[ -n "${SLACK_BOT_TOKEN:-}" ]] && export SLACK_BOT_TOKEN
+    [[ -n "${SLACK_ALLOWED_IDS:-}" ]] && export SLACK_ALLOWED_IDS
 
     run_onboard() {
         node "${NEMOCLAW_DIR}/bin/nemoclaw.js" onboard \
@@ -554,9 +601,13 @@ cmd_create() {
 
     local existing_sandbox
     existing_sandbox=$(openshell sandbox list 2>/dev/null | awk 'NR>1 && /Ready/ {print $1; exit}' || true)
-    if [[ -n "$existing_sandbox" ]]; then
+    if [[ -n "$existing_sandbox" && "${NEMOCLAW_RECREATE_SANDBOX:-0}" != "1" ]]; then
         log "Sandbox '${existing_sandbox}' already running — skipping onboard."
+        log "  (set NEMOCLAW_RECREATE_SANDBOX=1 to force a rebuild, e.g. after editing .env)"
     else
+        if [[ -n "$existing_sandbox" ]]; then
+            log "NEMOCLAW_RECREATE_SANDBOX=1 — onboard will recreate sandbox '${existing_sandbox}'."
+        fi
         log "Running NemoClaw onboard..."
         if ! run_onboard; then
             log "Retrying onboard (stale state cleanup)..."
@@ -565,44 +616,128 @@ cmd_create() {
     fi
 
     # ── Upload mediator binaries into sandbox ─────────────────────────────
+    # Pull from the cross-compiled aarch64 musl target dir, not the host build.
     local sandbox_name="${NEMOCLAW_SANDBOX_NAME:-my-assistant}"
+    local mediator_target_dir="${CARGO_TARGET_DIR}/aarch64-unknown-linux-musl/release"
     for bin_name in mediator-cli mediator-daemon; do
-        local bin_path="${CARGO_TARGET_DIR}/release/${bin_name}"
+        local bin_path="${mediator_target_dir}/${bin_name}"
         if [[ -f "$bin_path" ]]; then
-            log "Uploading ${bin_name} to sandbox..."
+            log "Uploading ${bin_name} (aarch64-linux-musl) to sandbox..."
             openshell sandbox upload "$sandbox_name" "$bin_path" "/sandbox/${bin_name}" \
             && log "${bin_name} uploaded to /sandbox/${bin_name}" \
             || log "Warning: ${bin_name} upload failed"
         else
-            log "Warning: ${bin_name} not found at $bin_path — skipping"
+            log "Warning: ${bin_name} not found at $bin_path — skipping (run ./stack.sh start to cross-compile)"
         fi
     done
 
+    # ── Start mediator daemon inside sandbox ──────────────────────────────
+    # nemoclaw-start.sh's start_mediator_daemon runs at sandbox boot, BEFORE
+    # we get a chance to upload these binaries. So the boot-time daemon start
+    # is a no-op (binary doesn't exist yet). We have to spawn it manually
+    # AFTER the upload succeeds. Uses sandbox-writable paths since /run is
+    # root-owned and we're running as the sandbox user post-boot.
+    # `openshell sandbox exec` rejects command args containing newlines, so the
+    # daemon-start sequence has to be expressed as a single semicolon-joined
+    # line. Uses sandbox-writable paths since /run is root-owned and the
+    # gateway is already running as the sandbox user post-boot.
+    if openshell sandbox exec -n "$sandbox_name" -- /sandbox/mediator-daemon --help \
+            >/dev/null 2>&1; then
+        log "Starting mediator daemon inside sandbox..."
+        # Pass --approval-bridge-url only when the bridge is actually running
+        # (APPROVAL_BOT_TOKEN was set during cmd_start). Otherwise the daemon
+        # runs without a bridge and fail-closes on policy_propose.
+        local bridge_arg=""
+        if [[ -n "${APPROVAL_BOT_TOKEN:-}" ]]; then
+            bridge_arg="--approval-bridge-url http://host.docker.internal:8090"
+            log "Mediator daemon will use approval bridge at host.docker.internal:8090"
+        else
+            log "  (no APPROVAL_BOT_TOKEN — daemon will fail-close on policy_propose)"
+        fi
+        openshell sandbox exec -n "$sandbox_name" -- sh -c "mkdir -p /sandbox/.mediator; rm -f /sandbox/.mediator/mediator.sock /sandbox/.mediator/mediator.sock.token; nohup /sandbox/mediator-daemon --socket /sandbox/.mediator/mediator.sock --db \"sqlite:///sandbox/.mediator/mediator.db?mode=rwc\" --token-file /sandbox/.mediator/mediator.sock.token ${bridge_arg} > /sandbox/.mediator/daemon.log 2>&1 & sleep 2; [ -S /sandbox/.mediator/mediator.sock ] && echo \"[mediator] daemon ready\" || (echo \"[mediator] daemon failed\"; tail -20 /sandbox/.mediator/daemon.log; exit 1)" \
+          && log "Mediator daemon running at /sandbox/.mediator/mediator.sock" \
+          || log "Warning: mediator daemon start failed"
+
+        # Inject MEDIATOR_SOCKET/MEDIATOR_TOKEN into the agent's bashrc and
+        # profile so interactive shells can call mediator-cli without manual
+        # exports. nemoclaw-start.sh runs at boot before the binary exists, so
+        # it can't do this — we have to do it post-upload here.
+        openshell sandbox exec -n "$sandbox_name" -- sh -c '
+          token=$(cat /sandbox/.mediator/mediator.sock.token 2>/dev/null || echo "")
+          for rc in /sandbox/.bashrc /sandbox/.profile; do
+            if ! grep -qF "MEDIATOR_SOCKET" "$rc" 2>/dev/null; then
+              printf "\n# mediator (injected by stack.sh)\nexport MEDIATOR_SOCKET=/sandbox/.mediator/mediator.sock\nexport MEDIATOR_TOKEN=%s\nexport PATH=/sandbox:$PATH\n" "$token" >> "$rc"
+            fi
+          done
+        ' >/dev/null 2>&1 \
+          && log "Mediator env vars injected into sandbox bashrc/profile" \
+          || log "Warning: failed to inject mediator env vars (interactive shells may need manual export)"
+    else
+        log "Warning: mediator-daemon binary not executable in sandbox — skipping start"
+    fi
+
+    # ── Install mediator skill ─────────────────────────────────────────────
+    # The mediator skill teaches OpenClaw when/how to use the mediator
+    # syscall API. Without it, the agent never reaches for fork_with_policy
+    # and just refuses requests it could otherwise route through a child.
+    # Lives in the user-managed skills dir (CONFIG_DIR/skills) and is
+    # discovered by OpenClaw's loadSkillsFromDir at session start.
+    local skill_src="${SCRIPT_DIR}/skills/mediator/SKILL.md"
+    if [[ -f "$skill_src" ]]; then
+        log "Installing mediator skill into sandbox..."
+        if openshell sandbox upload "$sandbox_name" "$skill_src" "/tmp/" >/dev/null 2>&1 \
+            && openshell sandbox exec -n "$sandbox_name" -- sh -c \
+                'mkdir -p /sandbox/.openclaw-data/skills/mediator && mv /tmp/SKILL.md /sandbox/.openclaw-data/skills/mediator/SKILL.md'; then
+            log "Mediator skill installed"
+        else
+            log "Warning: mediator skill install failed"
+        fi
+    fi
+
     # ── Upload agent syscall guide ─────────────────────────────────────────
+    # NOTE: `openshell sandbox upload` always treats DEST as a parent directory
+    # and uses the source basename for the file. To land at MEDIATOR.md we have
+    # to stage a temp copy with the right name and then move it into place.
     local guide="${SCRIPT_DIR}/docs/agent-syscall-guide.md"
     if [[ -f "$guide" ]]; then
         log "Uploading agent syscall guide to sandbox..."
-        openshell sandbox upload "$sandbox_name" "$guide" \
-            "/sandbox/.openclaw/workspace/MEDIATOR.md" \
-        && log "Syscall guide uploaded as MEDIATOR.md" \
-        || log "Warning: guide upload failed"
+        local guide_tmp
+        guide_tmp="$(mktemp -d)/MEDIATOR.md"
+        cp "$guide" "$guide_tmp"
+        if openshell sandbox upload "$sandbox_name" "$guide_tmp" "/tmp/" \
+            && openshell sandbox exec -n "$sandbox_name" -- \
+                mv /tmp/MEDIATOR.md /sandbox/.openclaw/workspace/MEDIATOR.md; then
+            log "Syscall guide uploaded as MEDIATOR.md"
+        else
+            log "Warning: guide upload failed"
+        fi
+        rm -rf "$(dirname "$guide_tmp")"
     fi
 
     # ── Inject boot prompt (AGENTS.md) into sandbox workspace ────────────
-    # Source: --boot-prompt flag or NEMOCLAW_BOOT_PROMPT env var.
-    local boot_prompt="${BOOT_PROMPT:-${NEMOCLAW_BOOT_PROMPT:-}}"
+    # Source: --boot-prompt flag, NEMOCLAW_BOOT_PROMPT env var, or default.
+    # Default points at the mediator-aware boot prompt so the agent knows
+    # about the syscall API at session start.
+    local boot_prompt="${BOOT_PROMPT:-${NEMOCLAW_BOOT_PROMPT:-${SCRIPT_DIR}/tests/boot-prompts/default-mediator.md}}"
     if [[ -n "$boot_prompt" ]]; then
         if [[ ! -f "$boot_prompt" ]]; then
             echo "Error: boot prompt file not found: $boot_prompt" >&2
             exit 1
         fi
         log "Injecting boot prompt into sandbox workspace..."
-        # Upload AGENTS.md to the workspace inside the sandbox.
-        # XDG_CONFIG_HOME and DOCKER_HOST already exported by stack.sh.
-        openshell sandbox upload "$sandbox_name" "$boot_prompt" \
-            "/sandbox/.openclaw/workspace/AGENTS.md" \
-        && log "Boot prompt injected: $boot_prompt → AGENTS.md" \
-        || log "Warning: boot prompt injection failed — upload may not be supported yet"
+        # Upload AGENTS.md to the workspace inside the sandbox via the same
+        # tmp-rename dance MEDIATOR.md needs.
+        local agents_tmp
+        agents_tmp="$(mktemp -d)/AGENTS.md"
+        cp "$boot_prompt" "$agents_tmp"
+        if openshell sandbox upload "$sandbox_name" "$agents_tmp" "/tmp/" \
+            && openshell sandbox exec -n "$sandbox_name" -- \
+                mv /tmp/AGENTS.md /sandbox/.openclaw/workspace/AGENTS.md; then
+            log "Boot prompt injected: $boot_prompt → AGENTS.md"
+        else
+            log "Warning: boot prompt injection failed"
+        fi
+        rm -rf "$(dirname "$agents_tmp")"
     fi
 
     log "Sandbox ready."
@@ -711,7 +846,7 @@ _wait_for_litellm() {
     local elapsed=0
     local auth_header=""
     [[ -n "${LITELLM_MASTER_KEY:-}" ]] && auth_header="Authorization: Bearer ${LITELLM_MASTER_KEY}"
-    while ! curl -sfk --max-time 2 "https://localhost:4000/health/liveliness" \
+    while ! curl -sf --max-time 2 "http://localhost:4000/health/liveliness" \
         ${auth_header:+-H "$auth_header"} >/dev/null 2>&1; do
         sleep 1
         ((elapsed++))
