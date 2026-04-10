@@ -121,6 +121,22 @@ if ! command -v sqlite3 >/dev/null 2>&1; then
     exit 1
 fi
 
+# stack.sh builds a fresh openshell-cli at $CARGO_TARGET_DIR/release/openshell
+# that has the `sandbox download` subcommand the installed v0.0.16 lacks.
+# It also stores gateway metadata under $XDG_CONFIG_HOME, which stack.sh
+# overrides to a stack-local path. Source `./stack.sh env` to get both PATH
+# additions and the right XDG_CONFIG_HOME / DOCKER_HOST / COLIMA_HOME so
+# this script works without being wrapped in `./stack.sh run`.
+SCRIPT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+if [[ -x "${SCRIPT_ROOT}/stack.sh" ]]; then
+    eval "$("${SCRIPT_ROOT}/stack.sh" env 2>/dev/null)" || true
+fi
+STACK_DATA="${STACK_ROOT:-/Volumes/macmini1}/nemoclaw-stack"
+CARGO_TARGET_DIR="${CARGO_TARGET_DIR:-${STACK_DATA}/build/openshell/target}"
+if [[ -x "${CARGO_TARGET_DIR}/release/openshell" ]]; then
+    export PATH="${CARGO_TARGET_DIR}/release:${PATH}"
+fi
+
 tmpdir=$(mktemp -d -t mediator-audit.XXXXXX)
 trap 'rm -rf "$tmpdir"' EXIT
 
@@ -128,6 +144,7 @@ if ! openshell sandbox download "$SANDBOX_NAME" "$DB_PATH" "$tmpdir" >/dev/null 
     echo "error: failed to download $DB_PATH from sandbox '$SANDBOX_NAME'" >&2
     echo "  is the sandbox running and is the mediator daemon started?" >&2
     echo "  (try: ./stack.sh ps)" >&2
+    echo "  if the openshell CLI is too old, run via: ./stack.sh run $0 $*" >&2
     exit 1
 fi
 
