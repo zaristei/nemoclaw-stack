@@ -17,8 +17,14 @@ from typing import Any
 
 import aiohttp
 from aiohttp import web
-from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
-from telegram.ext import Application, CallbackQueryHandler, ContextTypes
+from telegram import ForceReply, InlineKeyboardButton, InlineKeyboardMarkup, Update
+from telegram.ext import (
+    Application,
+    CallbackQueryHandler,
+    ContextTypes,
+    MessageHandler,
+    filters,
+)
 
 logging.basicConfig(
     level=logging.INFO,
@@ -46,8 +52,10 @@ pending_chunks: dict[str, dict[str, Any]] = {}
 # Maps proposal_id -> policy proposal info dict
 pending_proposals: dict[str, dict[str, Any]] = {}
 
-# Maps approval_id -> syscall approval info dict
-pending_syscalls: dict[str, dict[str, Any]] = {}
+# Maps Telegram message_id (of a ForceReply prompt) -> deny context awaiting
+# the operator's reason text. When the operator replies to that prompt, we
+# look up by reply_to_message.message_id and finalize the denial decision.
+pending_deny_replies: dict[int, dict[str, Any]] = {}
 
 
 # ---------------------------------------------------------------------------
@@ -84,8 +92,6 @@ async def handle_webhook(request: web.Request) -> web.Response:
     event = payload.get("event", "")
     if event == "mediator_policy_proposal":
         return await _handle_policy_proposal(request, payload)
-    if event == "mediator_syscall_approval":
-        return await _handle_syscall_approval(request, payload)
     if event != "draft_chunks_proposed":
         log.info("Ignoring event: %s", event)
         return web.Response(status=200, text="ignored")
@@ -163,30 +169,34 @@ async def handle_webhook(request: web.Request) -> web.Response:
 async def _handle_policy_proposal(
     request: web.Request, payload: dict[str, Any]
 ) -> web.Response:
-    """Handle a mediator policy proposal — send to Telegram for approval."""
+    """Handle a mediator policy proposal — send the FULL policy to Telegram.
+
+    Renders header + pretty-printed config (split across multiple messages if
+    needed) + Approve/Deny buttons. Truncating any field would let an agent
+    hide elevation past the cutoff.
+    """
     proposal_id = payload.get("proposal_id", "")
     if not proposal_id:
         return web.Response(status=400, text="missing proposal_id")
 
     policy_config = payload.get("config", {})
+    taint_warnings = payload.get("taint_warnings")
     policy_name = policy_config.get("policy_name", "unknown")
     rationale = policy_config.get("rationale", "")
-    http_allowlist = policy_config.get("http_allowlist", [])
-    bind_ports = policy_config.get("bind_ports", [])
 
     pending_proposals[proposal_id] = {
         "config": policy_config,
         "policy_name": policy_name,
     }
 
-    text = (
-        f"🔒 Policy Proposal\n"
-        f"Name: <b>{_escape(policy_name)}</b>\n"
-        f"Rationale: {_escape(rationale)}\n"
-        f"HTTP allowlist: <code>{_escape(', '.join(http_allowlist[:5]))}</code>\n"
+    config_pretty = json.dumps(policy_config, indent=2, sort_keys=True, default=str)
+
+    header = (
+        f"🔒 <b>Policy Proposal</b>\n"
+        f"Name: <code>{_escape(policy_name)}</code>\n"
+        f"Rationale: {_escape(rationale) or '<i>(none provided)</i>'}\n"
+        f"proposal_id: <code>{_escape(proposal_id)}</code>"
     )
-    if bind_ports:
-        text += f"Ports: <code>{bind_ports[0]}–{bind_ports[1]}</code>\n"
 
     keyboard = InlineKeyboardMarkup(
         [
@@ -201,78 +211,60 @@ async def _handle_policy_proposal(
         ]
     )
 
+    MAX_BODY = 3500
+    chunks: list[str] = []
+    if len(config_pretty) <= MAX_BODY:
+        chunks.append(config_pretty)
+    else:
+        current = ""
+        for line in config_pretty.splitlines(keepends=True):
+            if len(current) + len(line) > MAX_BODY:
+                if current:
+                    chunks.append(current)
+                current = line
+            else:
+                current += line
+        if current:
+            chunks.append(current)
+
     app = request.app["telegram_app"]
     try:
         await app.bot.send_message(
             chat_id=TELEGRAM_CHAT_ID,
-            text=text,
+            text=header,
+            parse_mode="HTML",
+        )
+        if taint_warnings:
+            taint_pretty = json.dumps(taint_warnings, indent=2, sort_keys=True)
+            await app.bot.send_message(
+                chat_id=TELEGRAM_CHAT_ID,
+                text=f"⚠️ <b>Taint warnings:</b>\n<pre>{_escape(taint_pretty[:3500])}</pre>",
+                parse_mode="HTML",
+            )
+        total = len(chunks)
+        for idx, chunk in enumerate(chunks, 1):
+            label = f"Config ({idx}/{total}):" if total > 1 else "Config:"
+            await app.bot.send_message(
+                chat_id=TELEGRAM_CHAT_ID,
+                text=f"{label}\n<pre>{_escape(chunk)}</pre>",
+                parse_mode="HTML",
+            )
+        await app.bot.send_message(
+            chat_id=TELEGRAM_CHAT_ID,
+            text=f"Approve policy <code>{_escape(policy_name)}</code>?",
             parse_mode="HTML",
             reply_markup=keyboard,
         )
     except Exception:
         log.exception("Failed to send policy proposal to Telegram")
 
-    log.info("Policy proposal %s for '%s' sent to Telegram", proposal_id, policy_name)
-    return web.Response(status=200, text="")
-
-
-async def _handle_syscall_approval(
-    request: web.Request, payload: dict[str, Any]
-) -> web.Response:
-    """Handle an init syscall approval request — send to Telegram for approval."""
-    approval_id = payload.get("approval_id", "")
-    if not approval_id:
-        return web.Response(status=400, text="missing approval_id")
-
-    method = payload.get("method", "unknown")
-    params = payload.get("params", {})
-    policy_name = payload.get("policy_name", "unknown")
-    caller = payload.get("caller", "unknown")
-
-    pending_syscalls[approval_id] = {
-        "method": method,
-        "params": params,
-        "policy_name": policy_name,
-    }
-
-    # Summarize params for display.
-    params_summary = json.dumps(params, indent=None, default=str)
-    if len(params_summary) > 200:
-        params_summary = params_summary[:200] + "..."
-
-    text = (
-        f"⚡ Syscall Approval Request\n"
-        f"Caller: <b>{_escape(caller)}</b>\n"
-        f"Method: <b>{_escape(method)}</b>\n"
-        f"Policy: <code>{_escape(policy_name)}</code>\n"
-        f"Params: <code>{_escape(params_summary)}</code>"
+    log.info(
+        "Policy proposal %s for '%s' sent to Telegram (%d chunks, %d chars)",
+        proposal_id,
+        policy_name,
+        len(chunks),
+        len(config_pretty),
     )
-
-    keyboard = InlineKeyboardMarkup(
-        [
-            [
-                InlineKeyboardButton(
-                    "Approve", callback_data=f"syscall_approve:{approval_id}"
-                ),
-                InlineKeyboardButton(
-                    "Deny", callback_data=f"syscall_deny:{approval_id}"
-                ),
-            ]
-        ]
-    )
-
-    app = request.app["telegram_app"]
-    try:
-        await app.bot.send_message(
-            chat_id=TELEGRAM_CHAT_ID,
-            text=text,
-            parse_mode="HTML",
-            reply_markup=keyboard,
-        )
-    except Exception:
-        log.exception("Failed to send syscall approval to Telegram")
-
-    log.info("Syscall approval %s for '%s' sent to Telegram", approval_id, method)
     return web.Response(status=200, text="")
 
 
@@ -306,54 +298,63 @@ async def handle_button(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
 
     action, item_id = data.split(":", 1)
 
-    # Handle syscall approvals.
-    if action in ("syscall_approve", "syscall_deny"):
-        syscall_info = pending_syscalls.pop(item_id, None)
-        if syscall_info is None:
-            await query.edit_message_text("Syscall approval already decided or expired.")
-            return
-        user = query.from_user
-        actor = f"telegram:{user.id}" if user else "telegram:unknown"
-        method = syscall_info.get("method", "unknown")
-        approved = action == "syscall_approve"
-        status_text = "approved" if approved else "denied"
-        await query.edit_message_text(
-            f"Syscall <b>{_escape(method)}</b> {status_text} by {actor}.",
-            parse_mode="HTML",
-        )
-        log.info("Syscall %s %s by %s", item_id, status_text, actor)
-        context.bot_data.setdefault("syscall_decisions", []).append(
-            {
-                "approval_id": item_id,
-                "approved": approved,
-                "reason": f"{status_text} by {actor}",
-            }
-        )
-        return
-
     # Handle policy proposals.
     if action in ("policy_approve", "policy_deny"):
-        proposal_info = pending_proposals.pop(item_id, None)
+        proposal_info = pending_proposals.get(item_id)
         if proposal_info is None:
             await query.edit_message_text("Proposal already decided or expired.")
             return
         user = query.from_user
         actor = f"telegram:{user.id}" if user else "telegram:unknown"
         policy_name = proposal_info.get("policy_name", "unknown")
-        approved = action == "policy_approve"
-        status_text = "approved" if approved else "denied"
+
+        if action == "policy_approve":
+            pending_proposals.pop(item_id, None)
+            await query.edit_message_text(
+                f"Policy <b>{_escape(policy_name)}</b> approved by {actor}.",
+                parse_mode="HTML",
+            )
+            log.info("Policy %s approved by %s", item_id, actor)
+            context.bot_data.setdefault("policy_decisions", []).append(
+                {
+                    "proposal_id": item_id,
+                    "approved": True,
+                    "reason": f"approved by {actor}",
+                }
+            )
+            return
+
+        # Deny path: prompt for a reason via ForceReply, capture in handle_reply.
         await query.edit_message_text(
-            f"Policy <b>{_escape(policy_name)}</b> {status_text} by {actor}.",
+            f"Denying policy <b>{_escape(policy_name)}</b>... waiting for reason from {actor}.",
             parse_mode="HTML",
         )
-        log.info("Policy %s %s by %s", item_id, status_text, actor)
-        context.bot_data.setdefault("policy_decisions", []).append(
-            {
+        try:
+            sent = await context.bot.send_message(
+                chat_id=TELEGRAM_CHAT_ID,
+                text=(
+                    f"Reply with the denial reason for policy "
+                    f"<code>{_escape(policy_name)}</code> "
+                    f"(or send <code>/skip</code> to deny without one):"
+                ),
+                parse_mode="HTML",
+                reply_markup=ForceReply(selective=False),
+            )
+            pending_deny_replies[sent.message_id] = {
                 "proposal_id": item_id,
-                "approved": approved,
-                "reason": f"{status_text} by {actor}",
+                "policy_name": policy_name,
+                "actor": actor,
             }
-        )
+        except Exception:
+            log.exception("Failed to send policy deny-reason prompt; finalizing without reason")
+            pending_proposals.pop(item_id, None)
+            context.bot_data.setdefault("policy_decisions", []).append(
+                {
+                    "proposal_id": item_id,
+                    "approved": False,
+                    "reason": f"denied by {actor} (reason prompt failed)",
+                }
+            )
         return
 
     # Handle chunk approvals.
@@ -393,6 +394,47 @@ async def handle_button(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     )
 
 
+async def handle_reply(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Capture text replies to ForceReply prompts (policy deny-with-reason flow).
+
+    Looks up the parent message id in `pending_deny_replies`. If matched,
+    finalizes the policy denial with the operator's reason text. If unmatched,
+    the reply is ignored — the bridge doesn't otherwise listen for chat messages.
+    """
+    msg = update.message
+    if msg is None or msg.reply_to_message is None:
+        return
+    parent_id = msg.reply_to_message.message_id
+    deny_info = pending_deny_replies.pop(parent_id, None)
+    if deny_info is None:
+        return
+
+    actor = deny_info.get("actor", "telegram:unknown")
+    raw = (msg.text or "").strip()
+    if raw.lower() in ("/skip", "skip", ""):
+        reason_text = "(no reason given)"
+    else:
+        reason_text = raw
+
+    proposal_id = deny_info["proposal_id"]
+    policy_name = deny_info.get("policy_name", "unknown")
+    pending_proposals.pop(proposal_id, None)
+    context.bot_data.setdefault("policy_decisions", []).append(
+        {
+            "proposal_id": proposal_id,
+            "approved": False,
+            "reason": f"denied by {actor}: {reason_text}",
+        }
+    )
+    log.info("Policy %s denied by %s with reason: %s", proposal_id, actor, reason_text)
+    try:
+        await msg.reply_text(
+            f"✓ Recorded denial for policy {policy_name}\nReason: {reason_text}"
+        )
+    except Exception:
+        log.exception("Failed to send policy denial confirmation")
+
+
 # ---------------------------------------------------------------------------
 # Decision retrieval endpoint (OpenShell can poll this)
 # ---------------------------------------------------------------------------
@@ -409,13 +451,6 @@ async def handle_policy_decisions(request: web.Request) -> web.Response:
     """Return and flush pending policy proposal decisions."""
     app = request.app["telegram_app"]
     decisions = app.bot_data.pop("policy_decisions", [])
-    return web.json_response({"decisions": decisions})
-
-
-async def handle_syscall_decisions(request: web.Request) -> web.Response:
-    """Return and flush pending syscall approval decisions."""
-    app = request.app["telegram_app"]
-    decisions = app.bot_data.pop("syscall_decisions", [])
     return web.json_response({"decisions": decisions})
 
 
@@ -436,6 +471,22 @@ async def run() -> None:
     # Build Telegram bot application.
     telegram_app = Application.builder().token(TELEGRAM_BOT_TOKEN).build()
     telegram_app.add_handler(CallbackQueryHandler(handle_button))
+    # Capture text replies to ForceReply prompts (deny-with-reason flow).
+    # Filter to text messages that are replies, so we don't process arbitrary
+    # chat noise.
+    telegram_app.add_handler(
+        MessageHandler(
+            filters.TEXT & filters.REPLY & ~filters.COMMAND,
+            handle_reply,
+        )
+    )
+    # Also handle /skip as a special command that might come in as a reply.
+    telegram_app.add_handler(
+        MessageHandler(
+            filters.Regex(r"^/skip\b") & filters.REPLY,
+            handle_reply,
+        )
+    )
 
     # Build HTTP server.
     http_app = web.Application()
@@ -443,7 +494,6 @@ async def run() -> None:
     http_app.router.add_post("/webhook", handle_webhook)
     http_app.router.add_get("/decisions", handle_decisions)
     http_app.router.add_get("/policy-decisions", handle_policy_decisions)
-    http_app.router.add_get("/syscall-decisions", handle_syscall_decisions)
     http_app.router.add_get("/health", lambda _: web.Response(text="ok"))
 
     runner = web.AppRunner(http_app)
@@ -452,7 +502,9 @@ async def run() -> None:
 
     # Start both.
     async with telegram_app:
-        await telegram_app.updater.start_polling(allowed_updates=["callback_query"])
+        await telegram_app.updater.start_polling(
+            allowed_updates=["callback_query", "message"]
+        )
         await telegram_app.start()
         await site.start()
         log.info("Approval bridge listening on %s:%d", LISTEN_HOST, LISTEN_PORT)
