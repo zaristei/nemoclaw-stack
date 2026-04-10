@@ -662,14 +662,11 @@ cmd_create() {
         # profile so interactive shells can call mediator-cli without manual
         # exports. nemoclaw-start.sh runs at boot before the binary exists, so
         # it can't do this — we have to do it post-upload here.
-        openshell sandbox exec -n "$sandbox_name" -- sh -c '
-          token=$(cat /sandbox/.mediator/mediator.sock.token 2>/dev/null || echo "")
-          for rc in /sandbox/.bashrc /sandbox/.profile; do
-            if ! grep -qF "MEDIATOR_SOCKET" "$rc" 2>/dev/null; then
-              printf "\n# mediator (injected by stack.sh)\nexport MEDIATOR_SOCKET=/sandbox/.mediator/mediator.sock\nexport MEDIATOR_TOKEN=%s\nexport PATH=/sandbox:$PATH\n" "$token" >> "$rc"
-            fi
-          done
-        ' >/dev/null 2>&1 \
+        # `openshell sandbox exec` rejects command args containing newlines
+        # (gRPC InvalidArgument), so the script is collapsed to one
+        # semicolon-joined line. \$PATH is escaped so it expands at shell
+        # load time, not when this command runs.
+        openshell sandbox exec -n "$sandbox_name" -- sh -c 'token=$(cat /sandbox/.mediator/mediator.sock.token 2>/dev/null || echo ""); for rc in /sandbox/.bashrc /sandbox/.profile; do if ! grep -qF "MEDIATOR_SOCKET" "$rc" 2>/dev/null; then printf "\n# mediator (injected by stack.sh)\nexport MEDIATOR_SOCKET=/sandbox/.mediator/mediator.sock\nexport MEDIATOR_TOKEN=%s\nexport PATH=/sandbox:\$PATH\n" "$token" >> "$rc"; fi; done' >/dev/null 2>&1 \
           && log "Mediator env vars injected into sandbox bashrc/profile" \
           || log "Warning: failed to inject mediator env vars (interactive shells may need manual export)"
     else
