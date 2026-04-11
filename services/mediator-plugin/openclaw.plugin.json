@@ -1,0 +1,6 @@
+{
+  "id": "mediator-tools",
+  "name": "Mediator Syscall Tools",
+  "version": "0.1.0",
+  "description": "Exposes mediator syscalls (policy_propose, fork_with_policy, ipc_send, etc.) as native agent tools. The agent no longer needs to shell out via exec — each syscall is a typed function call."
+}

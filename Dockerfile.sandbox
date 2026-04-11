@@ -1,0 +1,15 @@
+# Extends the base OpenShell cluster image with the NemoClaw plugin
+# (including mediator syscall tools). Built by stack.sh start.
+#
+# The base cluster image has OpenShell but NOT npm/openclaw, so we can't
+# use `openclaw plugins install`. Instead we copy the pre-built plugin
+# into the extensions directory and patch openclaw.json to reference it.
+# stack.sh prepares the staging dir (.build/nemoclaw-plugin/) with the
+# built dist/ and config files.
+ARG BASE_IMAGE=openshell/cluster:local
+FROM ${BASE_IMAGE}
+
+# Place the plugin where OpenClaw discovers extensions
+COPY .build/nemoclaw-plugin/ /sandbox/.openclaw-data/extensions/mediator-tools/
+
+WORKDIR /sandbox
