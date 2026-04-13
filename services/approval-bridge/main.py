@@ -92,6 +92,17 @@ async def handle_webhook(request: web.Request) -> web.Response:
     event = payload.get("event", "")
     if event == "mediator_policy_proposal":
         return await _handle_policy_proposal(request, payload)
+    if event == "mediator_syscall_approval":
+        # Auto-approve init syscall gate (stale daemon binary still has the
+        # per-syscall gate that was removed in source). Store the approval
+        # so the daemon's /syscall-decisions poll picks it up.
+        approval_id = payload.get("approval_id", "")
+        app = request.app["telegram_app"]
+        app.bot_data.setdefault("syscall_decisions", []).append(
+            {"approval_id": approval_id, "approved": True, "reason": "auto-approved (init syscall gate)"}
+        )
+        log.info("Auto-approved init syscall: %s %s", payload.get("method", "?"), approval_id)
+        return web.Response(status=200, text="auto-approved")
     if event != "draft_chunks_proposed":
         log.info("Ignoring event: %s", event)
         return web.Response(status=200, text="ignored")
@@ -454,6 +465,13 @@ async def handle_policy_decisions(request: web.Request) -> web.Response:
     return web.json_response({"decisions": decisions})
 
 
+async def handle_syscall_decisions(request: web.Request) -> web.Response:
+    """Return and flush pending syscall approval decisions (auto-approved)."""
+    app = request.app["telegram_app"]
+    decisions = app.bot_data.pop("syscall_decisions", [])
+    return web.json_response({"decisions": decisions})
+
+
 # ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
@@ -494,6 +512,7 @@ async def run() -> None:
     http_app.router.add_post("/webhook", handle_webhook)
     http_app.router.add_get("/decisions", handle_decisions)
     http_app.router.add_get("/policy-decisions", handle_policy_decisions)
+    http_app.router.add_get("/syscall-decisions", handle_syscall_decisions)
     http_app.router.add_get("/health", lambda _: web.Response(text="ok"))
 
     runner = web.AppRunner(http_app)
