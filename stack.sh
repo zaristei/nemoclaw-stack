@@ -778,6 +778,27 @@ cmd_create() {
         rm -rf "$(dirname "$agents_tmp")"
     fi
 
+    # ── Activate mediator-tools plugin (post-gateway-start) ─────────────
+    # The plugin files are baked into the image at
+    # /sandbox/.openclaw-data/extensions/mediator-tools/ but dormant until
+    # plugins.load.paths references them. We patch the config AFTER the
+    # gateway has completed its startup migration — patching before startup
+    # causes a delayed crash. The gateway hot-reloads config changes.
+    if openshell sandbox exec -n "$sandbox_name" -- \
+            test -f /sandbox/.openclaw-data/extensions/mediator-tools/openclaw.plugin.json 2>/dev/null; then
+        log "Activating mediator-tools plugin..."
+        docker exec openshell-cluster-nemoclaw kubectl exec -n openshell "$sandbox_name" -- \
+            python3 -c "
+import json
+cfg = json.load(open('/sandbox/.openclaw/openclaw.json'))
+cfg.setdefault('plugins', {})['load'] = {'paths': ['/sandbox/.openclaw-data/extensions/mediator-tools']}
+json.dump(cfg, open('/sandbox/.openclaw/openclaw.json', 'w'), indent=2)
+print('ok')
+" >/dev/null 2>&1 \
+          && log "Mediator tools plugin activated (gateway will hot-reload)" \
+          || log "Warning: mediator tools plugin activation failed"
+    fi
+
     log "Sandbox ready."
 }
 
