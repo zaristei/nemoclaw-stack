@@ -690,6 +690,7 @@ cmd_create() {
         local bridge_arg=""
         if [[ -n "${APPROVAL_BOT_TOKEN:-}" ]]; then
             bridge_arg="--approval-bridge-url http://host.docker.internal:8090"
+            [[ -n "${WEBHOOK_SECRET:-}" ]] && bridge_arg+=" --webhook-secret ${WEBHOOK_SECRET}"
             log "Mediator daemon will use approval bridge at host.docker.internal:8090"
         else
             log "  (no APPROVAL_BOT_TOKEN — daemon will fail-close on policy_propose)"
