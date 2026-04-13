@@ -4,25 +4,61 @@ description: "OpenShell mediator syscalls — propose policies, fork child workf
 metadata: { "openclaw": { "emoji": "🛡️", "always": true } }
 ---
 
-# Mediator Skill — Real Capabilities via Policy Proposal
+# Mediator Skill — Native Tools for Capability Acquisition
 
-You run inside an OpenShell sandbox under a mediated policy. Most "capabilities" you'd reach for as built-in tools — web fetch, sockets, sensitive mounts, talking to other agents — are gated by policy, not absent. When a tool says "not configured" or you'd refuse for lack of access, **your first move is to propose a child workflow with the right policy and fork it**, not to give up.
-
-The full reference is at `/sandbox/.openclaw/workspace/MEDIATOR.md`. Read it once, then keep this skill loaded as the trigger.
+You have mediator syscalls as **native tools** in your tool list. Call them directly — they work exactly like `web_search` or `read`. Do NOT use `exec`, `/sandbox/mediator-cli`, or shell commands.
 
 ## When to Use
 
-- ✅ User wants live web data (calorie counts, news, prices, search) and you don't have web search
-- ✅ User wants you to talk to a service you can't currently reach
-- ✅ User wants you to read sensitive files that aren't in your mounts
-- ✅ You need to coordinate with another running workflow
-- ✅ Any "I'd love to help but I don't have X" — propose X instead of refusing
+- User wants live web data and you don't have web search → `policy_propose` a child with HTTP access
+- User wants you to talk to a service you can't reach → propose a policy for it
+- User wants sensitive files not in your mounts → propose a reader policy
+- You need to coordinate with another workflow → `ipc_send` / `ipc_connect`
+- Any "I can't do X" → propose X instead of refusing
 
 ## When NOT to Use
 
-- ❌ Tool that already works (just call it)
-- ❌ Task another loaded skill handles
-- ❌ Request you'd refuse on policy/safety grounds (forking doesn't bypass that)
+- Tool that already works (just call it)
+- Task another loaded skill handles
+- Request you'd refuse on safety grounds (forking doesn't bypass that)
+
+## Your Native Tools
+
+| Tool | What it does |
+|---|---|
+| `policy_propose` | Request a new child policy (operator must approve via Telegram) |
+| `fork_with_policy` | Spawn a child workflow under an approved policy |
+| `ipc_send` | Send a message to another workflow |
+| `ipc_connect` | Open a bidirectional stream |
+| `policy_list` | List all approved policies |
+| `policy_get` | Inspect a specific policy |
+| `mediator_ps` | List visible workflows |
+| `signal_workflow` | Send term/kill/stop/cont to a workflow |
+| `request_port` | Allocate a port |
+| `revoke_policy` | Destroy a policy |
+
+## Worked Example: "look up calorie counts"
+
+1. **Check existing policies:** call `policy_list` — if a fetcher policy exists, skip to step 3
+2. **Propose:** call `policy_propose` with:
+   ```json
+   {
+     "config": {
+       "policy_name": "nutrition_fetcher_v1",
+       "rationale": "Live calorie lookup for user meal plan",
+       "http_allowlist": ["https://api.search.brave.com/*", "https://api.nal.usda.gov/*"],
+       "external_mounts": [],
+       "allowed_child_policies": [],
+       "bind_ports": null,
+       "allowed_ipc_targets": ["init"],
+       "allowed_signal_targets": []
+     }
+   }
+   ```
+   Wait for operator approval (Telegram bridge). If denied, revise the rationale or scope.
+3. **Fork:** call `fork_with_policy` with `workflow_id`, `policy_name`, `inherit: false`
+4. **Send task:** call `ipc_send` with the child's workflow_id and your request
+5. **Read results** from the IPC response
 
 ## The Trifecta Rule
 
@@ -32,171 +68,13 @@ A single policy must NOT have all three of: **(1) sensitive data mount + (2) unt
 - **Processor** receives from reader, IPCs to sender (with scrubber)
 - **Sender** receives from processor, has external HTTP egress
 
-Each link has at most two of the three legs. The chain is safe; a monolith is not. The mediator runs taint analysis at `policy_propose` time and rejects (or warns about) trifecta violations.
-
-## CLI Surface
-
-The CLI lives at `/sandbox/mediator-cli`. **It takes JSON params, not flags.** Every method takes one JSON-object argument (or no argument for `ps` / `policy_list` / `request_port`).
-
-In interactive shells, `MEDIATOR_SOCKET` and `MEDIATOR_TOKEN` are pre-exported by the sandbox bashrc, so `mediator-cli` just works. If you're running from a non-interactive subprocess and the env vars aren't set, fall back to:
-
-```bash
-export MEDIATOR_SOCKET=/sandbox/.mediator/mediator.sock
-export MEDIATOR_TOKEN=$(cat /sandbox/.mediator/mediator.sock.token)
-```
-
-Output contract: success → JSON result on stdout, exit 0. Error → diagnostic on stderr, exit 1. **Always check exit code and quote actual stdout in your reports** — narrating what you "would have seen" is how confabulation starts.
-
-### Escaping workaround: `mediator-file`
-
-If your exec tool mangles JSON quotes when passed as a command argument, use the file-based wrapper instead:
-
-1. **Write** the JSON params to a temp file (using your file-write tool — no escaping needed):
-   ```
-   /tmp/proposal.json → {"config": {"policy_name": "...", ...}}
-   ```
-2. **Exec** a clean command with no special characters:
-   ```
-   /sandbox/mediator-file policy_propose /tmp/proposal.json
-   ```
-
-The wrapper reads the file and passes its contents to `mediator-cli`. Works for any method that takes JSON params. For methods with no params (`ps`, `policy_list`, `request_port`), just call directly: `/sandbox/mediator-file ps`.
-
-## The 10 Methods
-
-| Method | Mutating? | Params |
-|---|---|---|
-| `ps` | no | none |
-| `policy_list` | no | none |
-| `policy_get` | no | `{"policy_name": "..."}` |
-| `policy_propose` | yes (operator approval) | `{"config": <full MediationPolicy>}` |
-| `revoke_policy` | yes | `{"policy_name": "...", "hard": true}` |
-| `fork_with_policy` | yes | `{"workflow_id": "...", "policy_name": "...", "inherit": true}` |
-| `ipc_send` | yes | `{"target_workflow_id": "...", "message": {...}}` |
-| `ipc_connect` | yes | `{"target_workflow_id": "..."}` |
-| `signal` | yes | `{"target_workflow_id": "...", "signal": "term"}` |
-| `request_port` | yes | none |
-
-A `MediationPolicy` is the full object — every field must be present (even if empty). Fields:
-
-```json
-{
-  "policy_name": "fetcher_v1",
-  "rationale": "Web fetcher for nutrition data",
-  "http_allowlist": ["https://api.search.brave.com/*"],
-  "external_mounts": [],
-  "allowed_child_policies": [],
-  "bind_ports": null,
-  "allowed_ipc_targets": ["init"],
-  "allowed_signal_targets": []
-}
-```
-
-`policy_propose` will reject configs with empty `policy_name`, missing required fields, or duplicate names.
-
-## Discover
-
-```bash
-mediator-cli ps                                          # workflows you can see
-mediator-cli policy_list                                 # policies you can fork
-mediator-cli policy_get '{"policy_name": "init_v0"}'     # inspect one
-```
-
-## Propose
-
-```bash
-mediator-cli policy_propose '{
-  "config": {
-    "policy_name": "nutrition_fetcher_v1",
-    "rationale": "User asked for live calorie data; child needs Brave Search egress.",
-    "http_allowlist": ["https://api.search.brave.com/*"],
-    "external_mounts": [],
-    "allowed_child_policies": [],
-    "bind_ports": null,
-    "allowed_ipc_targets": ["init"],
-    "allowed_signal_targets": []
-  }
-}'
-```
-
-When the approval bridge is configured, this round-trips through Telegram and blocks until the operator approves or denies (5-minute timeout). Returns `{"approved": true, "reason": "..."}` on approval, exits 1 with the denial reason otherwise.
-
-## Fork
-
-```bash
-mediator-cli fork_with_policy '{
-  "workflow_id": "nutrition_fetch_1",
-  "policy_name": "nutrition_fetcher_v1",
-  "inherit": false
-}'
-```
-
-Returns `{"workflow_id": "...", "workflow_token": "...", "uid": ...}`. The child runs as its own UID with its own token. It can hit Brave Search but can't see your private context.
-
-## IPC
-
-```bash
-# Fire-and-forget message
-mediator-cli ipc_send '{
-  "target_workflow_id": "nutrition_fetch_1",
-  "message": {"action": "fetch", "url": "https://api.search.brave.com/res/v1/web/search?q=chicken+thigh+calories"}
-}'
-
-# Bidirectional stream (for back-and-forth conversation)
-mediator-cli ipc_connect '{"target_workflow_id": "nutrition_fetch_1"}'
-```
-
-## Worked Example: "look up calorie counts"
-
-```bash
-# 1. Check if a fetcher policy already exists.
-mediator-cli policy_list | grep -i fetcher
-
-# 2. If not, propose one. (Wait for operator approval via Telegram.)
-mediator-cli policy_propose '{
-  "config": {
-    "policy_name": "nutrition_fetcher_v1",
-    "rationale": "Live calorie lookup for the user meal plan",
-    "http_allowlist": ["https://api.search.brave.com/*", "https://api.nal.usda.gov/*"],
-    "external_mounts": [],
-    "allowed_child_policies": [],
-    "bind_ports": null,
-    "allowed_ipc_targets": ["init"],
-    "allowed_signal_targets": []
-  }
-}' || { echo "Proposal denied or timed out — tell the user and stop"; exit 1; }
-
-# 3. Fork the child.
-mediator-cli fork_with_policy '{
-  "workflow_id": "nutrition_fetch_1",
-  "policy_name": "nutrition_fetcher_v1",
-  "inherit": false
-}'
-
-# 4. Send it the fetch request.
-mediator-cli ipc_send '{
-  "target_workflow_id": "nutrition_fetch_1",
-  "message": {"action": "fetch", "url": "https://api.search.brave.com/res/v1/web/search?q=chicken+thigh+calories"}
-}'
-
-# 5. Read the response (poll ipc or open ipc_connect for stream), summarize for the user.
-```
-
 ## Failure Modes
 
-- **Connection refused / `Error: cannot connect to mediator at ...`** → daemon isn't running. Check `/sandbox/.mediator/mediator.sock` exists; check `/sandbox/.mediator/daemon.log`. Don't fabricate results.
-- **`Error: MEDIATOR_TOKEN not set`** → env vars aren't exported. Run the manual export above.
-- **`policy_propose denied: no approval bridge configured`** → operator hasn't wired the bridge. Tell the user; this is a deployment issue, not something you can route around.
-- **`policy denied: <reason>`** → operator rejected via Telegram. The reason is in the error. Either revise the proposal (smaller scope, different rationale) or tell the user.
-- **`policy proposal timed out`** → operator didn't respond within 5 minutes. Try again later.
-- **Fork fails with EPERM** → your parent policy doesn't list this child in `allowed_child_policies`. `policy_get` your own policy and check.
-- **`Error [E0609]: trifecta violation`** at propose time → your policy combined all three legs. Split into a chain.
-- **IPC times out** → child crashed or wasn't listening. `mediator-cli ps` to check; `signal` to kill if needed.
+- **`policy_propose` denied** → operator rejected. Revise rationale or narrow scope.
+- **`fork_with_policy` EPERM** → your policy doesn't allow that child. Check with `policy_get`.
+- **`ipc_send` fails** → child not running. Check with `mediator_ps`.
+- **Approval times out (5min)** → operator didn't respond. Try again later.
 
-## Reporting Honestly
+## Honesty
 
-When you run mediator syscalls in service of a user request, your final report MUST include the literal stdout of every `mediator-cli` invocation. Do not summarize what you "would have seen" — paste the actual output. If a call failed, paste the actual error. If you can't run a call, say so plainly. The operator can verify everything against the audit log; fabricated narratives will be caught and undermine trust.
-
-## Don't Refuse — Propose
-
-The most important behavior: **when you'd otherwise say "I can't do X because Y isn't configured," propose a policy that grants Y instead**. The mediator exists so the agent doesn't have to be locked into its initial capability set.
+Every syscall is audit-logged. The operator can verify everything. If a call fails, report the real error. Do not fabricate results.
