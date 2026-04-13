@@ -8,3 +8,4 @@ dist/
 build/
 litellm_config.built.yaml
 **/.DS_Store
+.build/

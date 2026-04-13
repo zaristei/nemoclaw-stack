@@ -33,7 +33,7 @@ export MISE_DATA_DIR="${STACK_DATA}/mise"
 export OPENSHELL_CLUSTER_IMAGE="openshell/cluster:local"
 
 OPENSHELL_DIR="${SCRIPT_DIR}/openshell"
-NEMOCLAW_DIR="${SCRIPT_DIR}/nemoclaw"
+NEMOCLAW_DIR="${NEMOCLAW_DIR:-${SCRIPT_DIR}/nemoclaw}"
 LITELLM_VENV="${STACK_DATA}/venv/litellm"
 LITELLM_PID="${STACK_DATA}/state/litellm.pid"
 LITELLM_LOG="${STACK_DATA}/logs/litellm.log"
@@ -546,6 +546,34 @@ cmd_start() {
         cd "${OPENSHELL_DIR}"
         IMAGE_TAG=local mise exec -- ./tasks/scripts/docker-build-image.sh cluster
     )
+
+    # ── Layer NemoClaw plugin (with mediator tools) on top ────────────────
+    # The base cluster image has OpenClaw but not the NemoClaw plugin.
+    # Build a thin layer that installs the pre-built plugin so mediator
+    # syscalls (policy_propose, fork_with_policy, ipc_send, etc.) are
+    # available as native agent tools.
+    local nemoclaw_plugin_src
+    nemoclaw_plugin_src="$(cd "${NEMOCLAW_DIR}/nemoclaw" 2>/dev/null && pwd)"
+    if [[ -f "${SCRIPT_DIR}/Dockerfile.sandbox" && -d "${nemoclaw_plugin_src}/dist" ]]; then
+        log "Building sandbox image with NemoClaw plugin..."
+        # Stage the built plugin into .build/ for the Docker build context.
+        local staging="${SCRIPT_DIR}/.build/nemoclaw-plugin"
+        rm -rf "$staging"
+        mkdir -p "$staging/dist"
+        cp "${nemoclaw_plugin_src}/dist/index.js" "$staging/dist/"
+        cp "${nemoclaw_plugin_src}/dist/mediator-tools.js" "$staging/dist/" 2>/dev/null || true
+        cp "${nemoclaw_plugin_src}/openclaw.plugin.json" "$staging/"
+        cp "${nemoclaw_plugin_src}/package.json" "$staging/"
+        if docker build \
+            -f "${SCRIPT_DIR}/Dockerfile.sandbox" \
+            -t openshell/cluster:local \
+            "${SCRIPT_DIR}" >/dev/null 2>&1; then
+            log "Sandbox image built with NemoClaw plugin (mediator tools included)"
+        else
+            log "Warning: sandbox image build failed — mediator tools will not be native agent tools"
+        fi
+        rm -rf "${SCRIPT_DIR}/.build"
+    fi
 
     log "Infrastructure ready. Run './stack.sh create' to create a sandbox."
 }
