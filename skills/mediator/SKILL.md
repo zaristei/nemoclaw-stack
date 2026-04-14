@@ -46,19 +46,36 @@ You have mediator syscalls as **native tools** in your tool list. Call them dire
      "config": {
        "policy_name": "nutrition_fetcher_v1",
        "rationale": "Live calorie lookup for user meal plan",
-       "http_allowlist": ["https://api.search.brave.com/*", "https://api.nal.usda.gov/*"],
-       "external_mounts": [],
+       "http_allowlist": ["https://api.search.brave.com/*", "https://host.docker.internal:4000/*"],
+       "external_mounts": [
+         {"path": "/usr/local/lib/node_modules/openclaw", "mode": "rx"},
+         {"path": "/usr/local/bin/openclaw", "mode": "rx"},
+         {"path": "/usr/local/bin/node", "mode": "rx"},
+         {"path": "/sandbox/.openclaw/openclaw.json", "mode": "r"},
+         {"path": "/sandbox/.openclaw-data/extensions", "mode": "r"},
+         {"path": "/sandbox/.openclaw-data/skills", "mode": "r"}
+       ],
        "allowed_child_policies": [],
        "bind_ports": null,
        "allowed_ipc_targets": ["init"],
-       "allowed_signal_targets": []
+       "allowed_signal_targets": [],
+       "allowed_launch_commands": ["openclaw agent --local *"]
      }
    }
    ```
+   The `http_allowlist` includes the inference endpoint (`host.docker.internal:4000`) so the child agent can call the LLM. The `external_mounts` grant read access to the OpenClaw runtime. The `allowed_launch_commands` restricts what `fork_with_policy` can run.
    Wait for operator approval (Telegram bridge). If denied, revise the rationale or scope.
-3. **Fork:** call `fork_with_policy` with `workflow_id`, `policy_name`, `inherit: false`
-4. **Send task:** call `ipc_send` with the child's workflow_id and your request
-5. **Read results** from the IPC response
+3. **Fork:** call `fork_with_policy` with:
+   ```json
+   {
+     "workflow_id": "nutrition_task_1",
+     "policy_name": "nutrition_fetcher_v1",
+     "inherit": false,
+     "command": ["openclaw", "agent", "--local", "--json", "-m", "fetch calorie info for blueberries"]
+   }
+   ```
+   The child process runs under its own UID. All tools (web_fetch, exec, read) execute under that UID — the kernel and L7 proxy enforce the policy.
+4. **Read results** — the child's stdout contains the JSON result. IPC delivery is a future feature.
 
 ## The Trifecta Rule
 

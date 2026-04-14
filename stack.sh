@@ -671,6 +671,17 @@ cmd_create() {
             || log "Warning: mediator-file upload failed"
     fi
 
+    # ── Upload agent-bootstrap script ───────────────────────────────────
+    # Sets up an OpenClaw agent workspace and runs --local under the
+    # child's UID. Used as the launch command in fork_with_policy.
+    local bootstrap_src="${SCRIPT_DIR}/scripts/sandbox-tools/agent-bootstrap.sh"
+    if [[ -f "$bootstrap_src" ]]; then
+        openshell sandbox upload "$sandbox_name" "$bootstrap_src" "/sandbox/" \
+            && openshell sandbox exec -n "$sandbox_name" -- chmod +x /sandbox/agent-bootstrap.sh \
+            && log "agent-bootstrap.sh uploaded to /sandbox/agent-bootstrap.sh" \
+            || log "Warning: agent-bootstrap.sh upload failed"
+    fi
+
     # ── Start mediator daemon inside sandbox ──────────────────────────────
     # nemoclaw-start.sh's start_mediator_daemon runs at sandbox boot, BEFORE
     # we get a chance to upload these binaries. So the boot-time daemon start
