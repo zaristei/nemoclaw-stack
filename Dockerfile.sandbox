@@ -12,4 +12,11 @@ FROM ${BASE_IMAGE}
 # Place the plugin where OpenClaw discovers extensions
 COPY .build/nemoclaw-plugin/ /sandbox/.openclaw-data/extensions/mediator-tools/
 
+# Configure the embedded mediator (runs inside OpenShell supervisor PID 1).
+# INIT_INFERENCE_ENDPOINT: the only HTTP endpoint init can reach.
+# APPROVAL_BRIDGE_URL: Telegram bridge for operator approval of policy proposals.
+# These are read by OpenShell's bootstrap_embedded() at PID 1 startup.
+ENV INIT_INFERENCE_ENDPOINT="http://host.docker.internal:4000/*"
+ENV APPROVAL_BRIDGE_URL="http://host.docker.internal:8090"
+
 WORKDIR /sandbox

@@ -138,8 +138,8 @@ cmd_ps() {
     fi
 
     local mediator_status
-    if [[ -S "$MEDIATOR_SOCK" ]]; then
-        mediator_status="embedded (socket: $MEDIATOR_SOCK)"
+    if [[ -n "$sandbox_status" ]] && openshell sandbox exec -n "$(echo "$sandbox_status" | awk '{print $1}')" -- test -S /sandbox/.mediator/mediator.sock 2>/dev/null; then
+        mediator_status="embedded (supervisor PID 1)"
     else
         mediator_status="not running"
     fi
@@ -496,29 +496,9 @@ cmd_start() {
         cd "${OPENSHELL_DIR}"
         mise exec -- cargo build --release -p openshell-sandbox
     )
-    # Build mediator-cli and mediator-daemon separately (requires mediator-tools feature).
-    # These are uploaded to the sandbox container (Linux aarch64 musl) — must
-    # be cross-compiled, NOT built for the host (macOS arm64). Without this,
-    # the binaries land inside the sandbox but fail with "Exec format error",
-    # silently — start_mediator_daemon swallows the failure and the daemon
-    # never runs. See AGENTS.md § Cross-Compilation.
-    log "Building mediator-cli + mediator-daemon (aarch64-linux-musl)..."
-    (
-        cd "${OPENSHELL_DIR}"
-        mise exec -- cargo zigbuild --release \
-            --target aarch64-unknown-linux-musl \
-            -p openshell-sandbox --features mediator-tools \
-            --bin mediator-cli --bin mediator-daemon
-    )
-
-    # ── Mediator env (embedded in sandbox process) ──────────────────────────
-    # The mediator now runs inside the sandbox binary. Export env vars so the
-    # sandbox process can bootstrap it.
-    export MEDIATOR_SOCKET="$MEDIATOR_SOCK"
-    export MEDIATOR_DB="sqlite://${MEDIATOR_DB}?mode=rwc"
-    export INIT_INFERENCE_ENDPOINT="http://host.docker.internal:4000/*"
-    mkdir -p "$(dirname "$MEDIATOR_SOCK")" "$(dirname "$MEDIATOR_DB")"
-    log "Mediator will start embedded in sandbox (socket: $MEDIATOR_SOCK)"
+    # The mediator runs embedded inside the OpenShell sandbox supervisor
+    # (PID 1). No standalone binary needed — env vars in Dockerfile.sandbox
+    # configure it (INIT_INFERENCE_ENDPOINT, APPROVAL_BRIDGE_URL).
 
     # ── Approval bridge ─────────────────────────────────────────────────────
     # Started here so it's already listening when the sandbox boots and the
@@ -643,35 +623,12 @@ cmd_create() {
         fi
     fi
 
-    # ── Upload mediator binaries into sandbox ─────────────────────────────
-    # Pull from the cross-compiled aarch64 musl target dir, not the host build.
+    # The mediator daemon runs embedded in the OpenShell supervisor (PID 1).
+    # No standalone binaries to upload. Only the agent-bootstrap script and
+    # skill files need to go into the sandbox.
     local sandbox_name="${NEMOCLAW_SANDBOX_NAME:-my-assistant}"
-    local mediator_target_dir="${CARGO_TARGET_DIR}/aarch64-unknown-linux-musl/release"
-    for bin_name in mediator-cli mediator-daemon; do
-        local bin_path="${mediator_target_dir}/${bin_name}"
-        if [[ -f "$bin_path" ]]; then
-            log "Uploading ${bin_name} (aarch64-linux-musl) to sandbox..."
-            openshell sandbox upload "$sandbox_name" "$bin_path" "/sandbox/${bin_name}" \
-            && log "${bin_name} uploaded to /sandbox/${bin_name}" \
-            || log "Warning: ${bin_name} upload failed"
-        else
-            log "Warning: ${bin_name} not found at $bin_path — skipping (run ./stack.sh start to cross-compile)"
-        fi
-    done
 
-    # ── Upload mediator-file wrapper ─────────────────────────────────────
-    # Shell wrapper that reads JSON params from a file instead of argv,
-    # sidestepping the exec tool's JSON-escaping issues. Agent writes JSON
-    # with its file tool (no escaping), then execs mediator-file <method> /tmp/params.json.
-    local mediator_file_src="${SCRIPT_DIR}/scripts/sandbox-tools/mediator-file"
-    if [[ -f "$mediator_file_src" ]]; then
-        openshell sandbox upload "$sandbox_name" "$mediator_file_src" "/sandbox/" \
-            && openshell sandbox exec -n "$sandbox_name" -- chmod +x /sandbox/mediator-file \
-            && log "mediator-file wrapper uploaded to /sandbox/mediator-file" \
-            || log "Warning: mediator-file upload failed"
-    fi
-
-    # ── Upload agent-bootstrap script ───────────────────────────────────
+    # ── Upload agent-bootstrap script ─────────────────────────────���─────
     # Sets up an OpenClaw agent workspace and runs --local under the
     # child's UID. Used as the launch command in fork_with_policy.
     local bootstrap_src="${SCRIPT_DIR}/scripts/sandbox-tools/agent-bootstrap.sh"
@@ -682,48 +639,12 @@ cmd_create() {
             || log "Warning: agent-bootstrap.sh upload failed"
     fi
 
-    # ── Start mediator daemon inside sandbox ──────────────────────────────
-    # nemoclaw-start.sh's start_mediator_daemon runs at sandbox boot, BEFORE
-    # we get a chance to upload these binaries. So the boot-time daemon start
-    # is a no-op (binary doesn't exist yet). We have to spawn it manually
-    # AFTER the upload succeeds. Uses sandbox-writable paths since /run is
-    # root-owned and we're running as the sandbox user post-boot.
-    # `openshell sandbox exec` rejects command args containing newlines, so the
-    # daemon-start sequence has to be expressed as a single semicolon-joined
-    # line. Uses sandbox-writable paths since /run is root-owned and the
-    # gateway is already running as the sandbox user post-boot.
-    if openshell sandbox exec -n "$sandbox_name" -- /sandbox/mediator-daemon --help \
-            >/dev/null 2>&1; then
-        log "Starting mediator daemon inside sandbox..."
-        # Pass --approval-bridge-url only when the bridge is actually running
-        # (APPROVAL_BOT_TOKEN was set during cmd_start). Otherwise the daemon
-        # runs without a bridge and fail-closes on policy_propose.
-        local bridge_arg=""
-        if [[ -n "${APPROVAL_BOT_TOKEN:-}" ]]; then
-            bridge_arg="--approval-bridge-url http://host.docker.internal:8090"
-            [[ -n "${WEBHOOK_SECRET:-}" ]] && bridge_arg+=" --webhook-secret ${WEBHOOK_SECRET}"
-            log "Mediator daemon will use approval bridge at host.docker.internal:8090"
-        else
-            log "  (no APPROVAL_BOT_TOKEN — daemon will fail-close on policy_propose)"
-        fi
-        openshell sandbox exec -n "$sandbox_name" -- sh -c "mkdir -p /sandbox/.mediator; rm -f /sandbox/.mediator/mediator.sock /sandbox/.mediator/mediator.sock.token; nohup /sandbox/mediator-daemon --socket /sandbox/.mediator/mediator.sock --db \"sqlite:///sandbox/.mediator/mediator.db?mode=rwc\" --token-file /sandbox/.mediator/mediator.sock.token ${bridge_arg} > /sandbox/.mediator/daemon.log 2>&1 & sleep 2; [ -S /sandbox/.mediator/mediator.sock ] && echo \"[mediator] daemon ready\" || (echo \"[mediator] daemon failed\"; tail -20 /sandbox/.mediator/daemon.log; exit 1)" \
-          && log "Mediator daemon running at /sandbox/.mediator/mediator.sock" \
-          || log "Warning: mediator daemon start failed"
-
-        # Inject MEDIATOR_SOCKET/MEDIATOR_TOKEN into the agent's bashrc and
-        # profile so interactive shells can call mediator-cli without manual
-        # exports. nemoclaw-start.sh runs at boot before the binary exists, so
-        # it can't do this — we have to do it post-upload here.
-        # `openshell sandbox exec` rejects command args containing newlines
-        # (gRPC InvalidArgument), so the script is collapsed to one
-        # semicolon-joined line. \$PATH is escaped so it expands at shell
-        # load time, not when this command runs.
-        openshell sandbox exec -n "$sandbox_name" -- sh -c 'token=$(cat /sandbox/.mediator/mediator.sock.token 2>/dev/null || echo ""); for rc in /sandbox/.bashrc /sandbox/.profile; do if ! grep -qF "MEDIATOR_SOCKET" "$rc" 2>/dev/null; then printf "\n# mediator (injected by stack.sh)\nexport MEDIATOR_SOCKET=/sandbox/.mediator/mediator.sock\nexport MEDIATOR_TOKEN=%s\nexport PATH=/sandbox:\$PATH\n" "$token" >> "$rc"; fi; done' >/dev/null 2>&1 \
-          && log "Mediator env vars injected into sandbox bashrc/profile" \
-          || log "Warning: failed to inject mediator env vars (interactive shells may need manual export)"
-    else
-        log "Warning: mediator-daemon binary not executable in sandbox — skipping start"
-    fi
+    # Inject MEDIATOR_SOCKET/MEDIATOR_TOKEN into the agent's bashrc so
+    # the mediator-tools plugin can find the socket. The embedded mediator
+    # writes the token file at /sandbox/.mediator/mediator.sock.token.
+    openshell sandbox exec -n "$sandbox_name" -- sh -c 'token=$(cat /sandbox/.mediator/mediator.sock.token 2>/dev/null || echo ""); for rc in /sandbox/.bashrc /sandbox/.profile; do if ! grep -qF "MEDIATOR_SOCKET" "$rc" 2>/dev/null; then printf "\n# mediator (embedded in supervisor)\nexport MEDIATOR_SOCKET=/sandbox/.mediator/mediator.sock\nexport MEDIATOR_TOKEN=%s\n" "$token" >> "$rc"; fi; done' >/dev/null 2>&1 \
+      && log "Mediator env vars injected into sandbox bashrc/profile" \
+      || log "Warning: failed to inject mediator env vars"
 
     # ── Install mediator skill ─────────────────────────────────────────────
     # The mediator skill teaches OpenClaw when/how to use the mediator
@@ -855,7 +776,7 @@ cmd_stop() {
     # ── Mediator (embedded — no separate PID) ─────────────────────────────
     # Mediator is now embedded in the sandbox process; no separate stop needed.
     # Clean up stale socket/pid files if they exist from previous runs.
-    rm -f "$MEDIATOR_PID" "$MEDIATOR_SOCK" 2>/dev/null
+    # Embedded mediator stops with the sandbox — no host-side cleanup needed.
 
     # ── Approval Bridge ─────────────────────────────────────────────────────
     _stop_pid_file "$BRIDGE_PID" "approval bridge"
