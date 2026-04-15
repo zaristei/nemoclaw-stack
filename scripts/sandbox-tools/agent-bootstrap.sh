@@ -82,10 +82,14 @@ for dir in extensions skills; do
     fi
 done
 
-# LiteLLM uses a self-signed cert — allow it for the child agent.
-# NOTE: child UID outbound traffic is iptables-restricted. The daemon adds
-# per-destination ACCEPT rules based on the policy's http_allowlist.
-# No HTTP_PROXY needed — traffic goes direct to allowed destinations.
+# Child UID outbound traffic is iptables-restricted to the L7 proxy.
+# Route all HTTP(S) through the proxy so the UidPolicyRegistry allowlist
+# is enforced. The proxy runs at 10.200.0.1:3128 (veth host side).
+export HTTP_PROXY="http://10.200.0.1:3128"
+export HTTPS_PROXY="http://10.200.0.1:3128"
+export http_proxy="http://10.200.0.1:3128"
+export https_proxy="http://10.200.0.1:3128"
+export NO_PROXY="localhost,127.0.0.1,10.200.0.1"
 export NODE_TLS_REJECT_UNAUTHORIZED=0
 
 # Run the agent turn. --local runs in-process (no gateway needed).
