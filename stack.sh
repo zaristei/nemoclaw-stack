@@ -108,7 +108,7 @@ Infrastructure:
 
 Sandbox:
   sandbox new [--boot-prompt <file>]   Create sandbox, onboard NemoClaw, configure mediator
-  sandbox deploy                       Rebuild OpenShell binary and hot-deploy (no recreate)
+  sandbox rebuild                      Rebuild OpenShell binary and hot-deploy (no recreate)
   sandbox ls                           List sandboxes
   sandbox rm [name]                    Delete a sandbox (default: my-assistant)
 
@@ -577,7 +577,7 @@ cmd_sandbox() {
     done
     case "$sub" in
         new)    cmd_sandbox_new "$@" ;;
-        deploy) cmd_deploy "$@" ;;
+        rebuild|deploy) cmd_deploy "$@" ;;
         ls|list) cmd_sandbox_ls ;;
         rm|delete) cmd_sandbox_rm "$@" ;;
         *)
@@ -958,8 +958,23 @@ cmd_deploy() {
         log "Mediator skill deployed"
     fi
 
-    log "Deploy complete. Note: gateway is NOT running after pod restart."
-    log "  Run './stack.sh create' for a full sandbox with gateway + Telegram."
+    # 8. Restart the OpenClaw gateway (killed by pod restart).
+    # The gateway is normally started by NemoClaw's onboard, which only runs
+    # during initial sandbox creation. After a pod restart, we have to
+    # re-launch it manually with the right environment.
+    log "Restarting OpenClaw gateway..."
+    docker exec openshell-cluster-nemoclaw kubectl exec -n openshell "$sandbox_name" -- \
+        sh -c 'export HOME=/sandbox; export NODE_USE_ENV_PROXY=1; nohup openclaw gateway > /tmp/gateway-rebuild.log 2>&1 &' 2>/dev/null
+    sleep 8
+    if docker exec openshell-cluster-nemoclaw kubectl exec -n openshell "$sandbox_name" -- \
+            pidof openclaw-gateway >/dev/null 2>&1; then
+        log "Gateway restarted"
+    else
+        log "Warning: gateway did not restart. Check /tmp/gateway-rebuild.log in the sandbox."
+        log "  You may need to run './stack.sh sandbox rm && ./stack.sh sandbox new' instead."
+    fi
+
+    log "Rebuild complete."
 }
 
 # ── Mediator post-create setup helper ────────────────────────────────────────
