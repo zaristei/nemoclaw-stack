@@ -61,7 +61,7 @@ shift || true
 CLEAN=0
 HEALTH_FULL=0
 BOOT_PROMPT=""
-if [[ "$COMMAND" != "run" ]]; then
+if [[ "$COMMAND" != "run" && "$COMMAND" != "sandbox" ]]; then
     while [[ $# -gt 0 ]]; do
         case "$1" in
             --secrets)
@@ -97,16 +97,20 @@ cmd_help() {
     cat <<'EOF'
 Usage: ./stack.sh <command> [options]
 
-Commands:
-  start [--secrets keychain]   Build and start infrastructure services
-  create [--boot-prompt <file>] Create sandbox and onboard NemoClaw (inject AGENTS.md from file)
-  deploy                       Rebuild OpenShell binary and hot-deploy to running cluster
+Infrastructure:
+  start [--secrets keychain]   Build and start infrastructure (Colima, LiteLLM, cluster image)
   stop  [--clean]              Graceful teardown (--clean wipes state dirs)
   ps                           Show component status
-  health [--full]              Test LiteLLM and provider connectivity (--full tests all OpenRouter providers)
+  health [--full]              Test LiteLLM and provider connectivity
   verify-models                Verify all model IDs against live APIs
-  env                          Print shell exports (use: eval \$(./stack.sh env))
+  env                          Print shell exports (use: eval $(./stack.sh env))
   run <cmd...>                 Run a command with stack env loaded
+
+Sandbox:
+  sandbox new [--boot-prompt <file>]   Create sandbox, onboard NemoClaw, configure mediator
+  sandbox deploy                       Rebuild OpenShell binary and hot-deploy (no recreate)
+  sandbox ls                           List sandboxes
+  sandbox rm [name]                    Delete a sandbox (default: my-assistant)
 
 Options:
   --secrets <backend>          Secrets backend: env (default), keychain
@@ -558,11 +562,44 @@ cmd_start() {
         rm -rf "${SCRIPT_DIR}/.build"
     fi
 
-    log "Infrastructure ready. Run './stack.sh create' to create a sandbox."
+    log "Infrastructure ready. Run './stack.sh sandbox new' to create a sandbox."
 }
 
-# ── CREATE ──────────────────────────────────────────────────────────────────
-cmd_create() {
+# ── SANDBOX ────────────────────────────────────────────────────────────────
+cmd_sandbox() {
+    local sub="${1:-help}"; shift 2>/dev/null || true
+    # Parse sandbox-specific flags
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --boot-prompt) BOOT_PROMPT="${2:?--boot-prompt requires a file path}"; shift 2 ;;
+            *) break ;;
+        esac
+    done
+    case "$sub" in
+        new)    cmd_sandbox_new "$@" ;;
+        deploy) cmd_deploy "$@" ;;
+        ls|list) cmd_sandbox_ls ;;
+        rm|delete) cmd_sandbox_rm "$@" ;;
+        *)
+            echo "Usage: ./stack.sh sandbox {new|deploy|ls|rm}" >&2
+            exit 1 ;;
+    esac
+}
+
+cmd_sandbox_ls() {
+    export PATH="${CARGO_TARGET_DIR}/release:${PATH}"
+    openshell sandbox list 2>/dev/null
+}
+
+cmd_sandbox_rm() {
+    export PATH="${CARGO_TARGET_DIR}/release:${PATH}"
+    local name="${1:-${NEMOCLAW_SANDBOX_NAME:-my-assistant}}"
+    log "Deleting sandbox ${name}..."
+    openshell sandbox delete "$name" 2>&1
+}
+
+# ── SANDBOX NEW ────────────────────────────────────────────────────────────
+cmd_sandbox_new() {
     export PATH="${CARGO_TARGET_DIR}/release:${PATH}"
 
     # ── Source root .env for Telegram/Discord/Slack tokens ──────────────────
@@ -1040,8 +1077,9 @@ _stop_pid_file() {
 # ── Dispatch ─────────────────────────────────────────────────────────────────
 case "$COMMAND" in
     start)  cmd_start ;;
-    create) cmd_create ;;
-    deploy) cmd_deploy ;;
+    sandbox) cmd_sandbox "$@" ;;
+    create) cmd_sandbox_new "$@" ;;  # backwards compat
+    deploy) cmd_deploy "$@" ;;       # backwards compat
     stop)   cmd_stop ;;
     ps)     cmd_ps ;;
     health) cmd_health ;;
