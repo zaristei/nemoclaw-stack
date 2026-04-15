@@ -100,6 +100,7 @@ Usage: ./stack.sh <command> [options]
 Commands:
   start [--secrets keychain]   Build and start infrastructure services
   create [--boot-prompt <file>] Create sandbox and onboard NemoClaw (inject AGENTS.md from file)
+  deploy                       Rebuild OpenShell binary and hot-deploy to running cluster
   stop  [--clean]              Graceful teardown (--clean wipes state dirs)
   ps                           Show component status
   health [--full]              Test LiteLLM and provider connectivity (--full tests all OpenRouter providers)
@@ -517,10 +518,16 @@ cmd_start() {
     fi
 
     # ── OpenShell: build cluster image ──────────────────────────────────────
-    log "Building OpenShell cluster image (cached)..."
+    # Use a hash of the sandbox crate source to bust the Docker cargo cache
+    # when code changes. Without this, BuildKit reuses stale compilation
+    # artifacts and the binary in the image doesn't include our changes.
+    local src_hash
+    src_hash=$(find "${OPENSHELL_DIR}/crates/openshell-sandbox/src" -name '*.rs' -exec md5 -q {} + 2>/dev/null | md5 -q 2>/dev/null || echo "default")
+    log "Building OpenShell cluster image (source hash: ${src_hash:0:8})..."
     (
         cd "${OPENSHELL_DIR}"
-        IMAGE_TAG=local mise exec -- ./tasks/scripts/docker-build-image.sh cluster
+        CARGO_TARGET_CACHE_SCOPE="${src_hash}" IMAGE_TAG=local \
+            mise exec -- ./tasks/scripts/docker-build-image.sh cluster
     )
 
     # ── Layer NemoClaw plugin (with mediator tools) on top ────────────────
@@ -635,22 +642,11 @@ cmd_create() {
             || log "Warning: agent-bootstrap.sh upload failed"
     fi
 
-    # ── Write mediator config file ──────────────────────────────────────
-    # The embedded mediator reads /sandbox/.mediator/config.json for settings
-    # that can't be passed via pod env vars. This file persists on the
-    # workspace PVC so it survives pod restarts.
-    local bridge_url=""
-    [[ -n "${APPROVAL_BOT_TOKEN:-}" ]] && bridge_url="http://host.docker.internal:8090"
-    openshell sandbox exec -n "$sandbox_name" -- sh -c "mkdir -p /sandbox/.mediator && printf '{\"APPROVAL_BRIDGE_URL\":\"${bridge_url}\",\"INIT_INFERENCE_ENDPOINT\":\"http://host.docker.internal:4000/*\"}' > /sandbox/.mediator/config.json" >/dev/null 2>&1 \
-      && log "Mediator config written to /sandbox/.mediator/config.json" \
-      || log "Warning: failed to write mediator config"
-
-    # Inject MEDIATOR_SOCKET/MEDIATOR_TOKEN into the agent's bashrc so
-    # the mediator-tools plugin can find the socket. The embedded mediator
-    # writes the token file at /sandbox/.mediator/mediator.sock.token.
-    openshell sandbox exec -n "$sandbox_name" -- sh -c 'token=$(cat /sandbox/.mediator/mediator.sock.token 2>/dev/null || echo ""); for rc in /sandbox/.bashrc /sandbox/.profile; do if ! grep -qF "MEDIATOR_SOCKET" "$rc" 2>/dev/null; then printf "\n# mediator (embedded in supervisor)\nexport MEDIATOR_SOCKET=/sandbox/.mediator/mediator.sock\nexport MEDIATOR_TOKEN=%s\n" "$token" >> "$rc"; fi; done' >/dev/null 2>&1 \
-      && log "Mediator env vars injected into sandbox bashrc/profile" \
-      || log "Warning: failed to inject mediator env vars"
+    # ── Mediator post-create setup ───────────────────────────────────────
+    # The embedded mediator reads config.json at runtime for settings that
+    # can't be injected via pod env vars (PVC is empty at boot time).
+    # Also writes the LiteLLM API key and Brave search key.
+    _setup_mediator "$sandbox_name"
 
     # ── Install mediator skill ─────────────────────────────────────────────
     # The mediator skill teaches OpenClaw when/how to use the mediator
@@ -837,6 +833,175 @@ export NEMOCLAW_HOME="${NEMOCLAW_HOME}"
 EOF
 }
 
+# ── DEPLOY ──────────────────────────────────────────────────────────────────
+# Rebuild the OpenShell binary and hot-deploy it into the running cluster
+# without recreating the sandbox. Use after making code changes to OpenShell.
+cmd_deploy() {
+    export PATH="${CARGO_TARGET_DIR}/release:${PATH}"
+
+    if [[ -f "${SCRIPT_DIR}/.env" ]]; then
+        set -a; source "${SCRIPT_DIR}/.env"; set +a
+    fi
+    source "${SCRIPT_DIR}/scripts/resolve-secrets.sh" 2>/dev/null || true
+
+    local sandbox_name="${NEMOCLAW_SANDBOX_NAME:-my-assistant}"
+
+    # 1. Rebuild cluster image with cache-busted sandbox binary
+    local src_hash
+    src_hash=$(find "${OPENSHELL_DIR}/crates/openshell-sandbox/src" -name '*.rs' -exec md5 -q {} + 2>/dev/null | md5 -q 2>/dev/null || echo "$(date +%s)")
+    log "Building OpenShell cluster image (source hash: ${src_hash:0:8})..."
+    (
+        cd "${OPENSHELL_DIR}"
+        CARGO_TARGET_CACHE_SCOPE="${src_hash}" IMAGE_TAG=local \
+            mise exec -- ./tasks/scripts/docker-build-image.sh cluster
+    )
+
+    # 2. Layer NemoClaw plugin
+    local nemoclaw_plugin_src
+    nemoclaw_plugin_src="$(cd "${NEMOCLAW_DIR}/nemoclaw" 2>/dev/null && pwd)"
+    if [[ -f "${SCRIPT_DIR}/Dockerfile.sandbox" && -d "${nemoclaw_plugin_src}/dist" ]]; then
+        local staging="${SCRIPT_DIR}/.build/nemoclaw-plugin"
+        rm -rf "$staging"; mkdir -p "$staging/dist"
+        cp "${nemoclaw_plugin_src}/dist/index.js" "$staging/dist/"
+        cp "${nemoclaw_plugin_src}/dist/mediator-tools.js" "$staging/dist/" 2>/dev/null || true
+        cp "${nemoclaw_plugin_src}/openclaw.plugin.json" "$staging/"
+        cp "${nemoclaw_plugin_src}/package.json" "$staging/"
+        docker build -f "${SCRIPT_DIR}/Dockerfile.sandbox" -t openshell/cluster:local "${SCRIPT_DIR}" >/dev/null 2>&1
+        rm -rf "${SCRIPT_DIR}/.build"
+    fi
+
+    # 3. Extract binary and copy to cluster HostPath
+    log "Deploying new binary to cluster..."
+    local tmp_bin="/tmp/openshell-sandbox-deploy-$$"
+    docker run --rm --entrypoint="" openshell/cluster:local \
+        cat /opt/openshell/bin/openshell-sandbox > "$tmp_bin" 2>/dev/null
+    docker cp "$tmp_bin" openshell-cluster-nemoclaw:/opt/openshell/bin/openshell-sandbox
+    docker exec openshell-cluster-nemoclaw chmod +x /opt/openshell/bin/openshell-sandbox
+    rm -f "$tmp_bin"
+    log "Binary deployed ($(docker exec openshell-cluster-nemoclaw wc -c < /opt/openshell/bin/openshell-sandbox 2>/dev/null) bytes)"
+
+    # 4. Clean stale mediator DB (schema may have changed) and restart pod
+    log "Restarting sandbox pod..."
+    docker exec openshell-cluster-nemoclaw kubectl exec -n openshell "$sandbox_name" -- \
+        sh -c 'rm -f /sandbox/.mediator/mediator.db /sandbox/.mediator/mediator.db-* /sandbox/.mediator/mediator.sock /sandbox/.mediator/mediator.sock.token' 2>/dev/null
+    docker exec openshell-cluster-nemoclaw kubectl delete pod "$sandbox_name" -n openshell 2>/dev/null
+
+    # 5. Wait for pod to come back
+    log "Waiting for pod to restart..."
+    local waited=0
+    while [[ $waited -lt 90 ]]; do
+        if docker exec openshell-cluster-nemoclaw kubectl exec -n openshell "$sandbox_name" -- \
+                test -S /sandbox/.mediator/mediator.sock 2>/dev/null; then
+            break
+        fi
+        sleep 5
+        waited=$((waited + 5))
+    done
+
+    if [[ $waited -ge 90 ]]; then
+        log "Warning: pod did not become ready within 90s"
+        return 1
+    fi
+
+    # 6. Re-apply mediator config + keys
+    _setup_mediator "$sandbox_name"
+
+    # 7. Upload bootstrap + skill
+    local bootstrap_src="${SCRIPT_DIR}/scripts/sandbox-tools/agent-bootstrap.sh"
+    if [[ -f "$bootstrap_src" ]]; then
+        openshell sandbox upload "$sandbox_name" "$bootstrap_src" "/sandbox/" >/dev/null 2>&1 \
+            && openshell sandbox exec -n "$sandbox_name" -- chmod +x /sandbox/agent-bootstrap.sh 2>/dev/null
+        log "agent-bootstrap.sh deployed"
+    fi
+    local skill_src="${SCRIPT_DIR}/skills/mediator/SKILL.md"
+    if [[ -f "$skill_src" ]]; then
+        openshell sandbox upload "$sandbox_name" "$skill_src" "/tmp/" >/dev/null 2>&1 \
+            && openshell sandbox exec -n "$sandbox_name" -- sh -c \
+                'mkdir -p /sandbox/.openclaw-data/skills/mediator && mv /tmp/SKILL.md /sandbox/.openclaw-data/skills/mediator/SKILL.md' 2>/dev/null
+        log "Mediator skill deployed"
+    fi
+
+    log "Deploy complete. Note: gateway is NOT running after pod restart."
+    log "  Run './stack.sh create' for a full sandbox with gateway + Telegram."
+}
+
+# ── Mediator post-create setup helper ────────────────────────────────────────
+_setup_mediator() {
+    local sandbox_name="$1"
+
+    # Source secrets
+    if [[ -f "${SCRIPT_DIR}/.env" ]]; then
+        set -a; source "${SCRIPT_DIR}/.env"; set +a
+    fi
+    source "${SCRIPT_DIR}/scripts/resolve-secrets.sh" 2>/dev/null || true
+
+    local bridge_url=""
+    [[ -n "${APPROVAL_BOT_TOKEN:-}" ]] && bridge_url="http://host.docker.internal:8090"
+
+    # Write mediator config.json via kubectl exec (avoids openshell sandbox exec quoting issues)
+    docker exec openshell-cluster-nemoclaw kubectl exec -n openshell "$sandbox_name" -- sh -c "
+mkdir -p /sandbox/.mediator
+cat > /sandbox/.mediator/config.json << 'MCONF'
+{\"APPROVAL_BRIDGE_URL\":\"${bridge_url}\",\"INIT_INFERENCE_ENDPOINT\":\"http://host.docker.internal:4000/*\"}
+MCONF
+" >/dev/null 2>&1 \
+      && log "Mediator config written" \
+      || log "Warning: failed to write mediator config"
+
+    # Write LiteLLM API key (for child agents calling LiteLLM directly)
+    if [[ -n "${LITELLM_MASTER_KEY:-}" ]]; then
+        docker exec openshell-cluster-nemoclaw kubectl exec -n openshell "$sandbox_name" -- \
+            sh -c "echo '${LITELLM_MASTER_KEY}' > /sandbox/.mediator/litellm.key && chmod 644 /sandbox/.mediator/litellm.key" >/dev/null 2>&1 \
+          && log "LiteLLM key written" \
+          || log "Warning: failed to write LiteLLM key"
+    fi
+
+    # Inject Brave Search API key into OpenClaw config (gateway hot-reloads)
+    if [[ -n "${BRAVE_API_KEY:-}" ]]; then
+        docker exec openshell-cluster-nemoclaw kubectl exec -n openshell "$sandbox_name" -- \
+            python3 -c "
+import json
+cfg = json.load(open('/sandbox/.openclaw/openclaw.json'))
+cfg.setdefault('tools', {}).setdefault('web', {})['search'] = {
+    'enabled': True, 'provider': 'brave',
+    'apiKey': '${BRAVE_API_KEY}'
+}
+cfg['tools']['web']['fetch'] = {'enabled': True}
+json.dump(cfg, open('/sandbox/.openclaw/openclaw.json', 'w'), indent=2)
+" >/dev/null 2>&1 \
+          && log "Brave Search key injected" \
+          || log "Warning: failed to inject Brave key"
+    fi
+
+    # Inject MEDIATOR_SOCKET/MEDIATOR_TOKEN into bashrc
+    docker exec openshell-cluster-nemoclaw kubectl exec -n openshell "$sandbox_name" -- \
+        sh -c 'token=$(cat /sandbox/.mediator/mediator.sock.token 2>/dev/null || echo ""); for rc in /sandbox/.bashrc /sandbox/.profile; do if ! grep -qF "MEDIATOR_SOCKET" "$rc" 2>/dev/null; then printf "\n# mediator (embedded in supervisor)\nexport MEDIATOR_SOCKET=/sandbox/.mediator/mediator.sock\nexport MEDIATOR_TOKEN=%s\n" "$token" >> "$rc"; fi; done' >/dev/null 2>&1 \
+      && log "Mediator env vars injected" \
+      || log "Warning: failed to inject mediator env vars"
+
+    # Start approval bridge if not running
+    if [[ -n "${APPROVAL_BOT_TOKEN:-}" ]]; then
+        if [[ -f "$BRIDGE_PID" ]] && kill -0 "$(cat "$BRIDGE_PID")" 2>/dev/null; then
+            log "Approval bridge already running"
+        else
+            log "Starting approval bridge..."
+            (
+                cd "${SCRIPT_DIR}/services/approval-bridge"
+                TELEGRAM_BOT_TOKEN="${APPROVAL_BOT_TOKEN}" \
+                APPROVAL_CHAT_ID="${TELEGRAM_ALLOWED_IDS}" \
+                    nohup python3 main.py > "${STACK_DATA}/logs/bridge.log" 2>&1 &
+                echo $! > "$BRIDGE_PID"
+            )
+            sleep 3
+            if curl -s http://localhost:8090/health >/dev/null 2>&1; then
+                log "Approval bridge running"
+            else
+                log "Warning: approval bridge failed to start"
+            fi
+        fi
+    fi
+}
+
 # ── Helpers ──────────────────────────────────────────────────────────────────
 _wait_for_litellm() {
     local max_wait=90
@@ -876,6 +1041,7 @@ _stop_pid_file() {
 case "$COMMAND" in
     start)  cmd_start ;;
     create) cmd_create ;;
+    deploy) cmd_deploy ;;
     stop)   cmd_stop ;;
     ps)     cmd_ps ;;
     health) cmd_health ;;
