@@ -1064,21 +1064,14 @@ cmd_deploy() {
         log "Mediator skill deployed"
     fi
 
-    # 8. Restart the OpenClaw gateway (killed by pod restart).
-    # The gateway is normally started by NemoClaw's onboard, which only runs
-    # during initial sandbox creation. After a pod restart, we have to
-    # re-launch it manually with the right environment.
-    log "Restarting OpenClaw gateway..."
-    docker exec openshell-cluster-nemoclaw kubectl exec -n openshell "$sandbox_name" -- \
-        sh -c 'export HOME=/sandbox; export NODE_USE_ENV_PROXY=1; nohup openclaw gateway > /tmp/gateway-rebuild.log 2>&1 &' 2>/dev/null
-    sleep 8
-    if docker exec openshell-cluster-nemoclaw kubectl exec -n openshell "$sandbox_name" -- \
-            pidof openclaw-gateway >/dev/null 2>&1; then
-        log "Gateway restarted"
-    else
-        log "Warning: gateway did not restart. Check /tmp/gateway-rebuild.log in the sandbox."
-        log "  You may need to run './stack.sh sandbox rm && ./stack.sh sandbox new' instead."
-    fi
+    # 8. Recreate the sandbox to get a working gateway + Telegram.
+    # The gateway requires NemoClaw's onboard environment (TELEGRAM_BOT_TOKEN
+    # resolution, proxy settings, etc.) which can't be replicated by a manual
+    # restart. The cleanest path is rm + new.
+    log "Recreating sandbox for gateway + Telegram..."
+    cmd_sandbox_rm "$sandbox_name"
+    sleep 3
+    cmd_sandbox_new
 
     log "Rebuild complete."
 }
