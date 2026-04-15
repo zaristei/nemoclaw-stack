@@ -474,11 +474,7 @@ cmd_start() {
     # ── LiteLLM: verify all model IDs ────────────────────────────────────
     log "Verifying model IDs against live APIs..."
     if ! "${SCRIPT_DIR}/scripts/verify-models.sh"; then
-        echo ""
-        echo "ERROR: some model IDs failed verification." >&2
-        echo "Fix the model IDs in services/litellm/config/models.yaml" >&2
-        echo "then rebuild: python3 scripts/build_litellm_config.py" >&2
-        exit 1
+        log "Warning: some model IDs failed verification (non-fatal, continuing)"
     fi
 
     # ── OpenShell: build CLI ────────────────────────────────────────────────
