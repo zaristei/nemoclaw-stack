@@ -635,6 +635,16 @@ cmd_create() {
             || log "Warning: agent-bootstrap.sh upload failed"
     fi
 
+    # ── Write mediator config file ──────────────────────────────────────
+    # The embedded mediator reads /sandbox/.mediator/config.json for settings
+    # that can't be passed via pod env vars. This file persists on the
+    # workspace PVC so it survives pod restarts.
+    local bridge_url=""
+    [[ -n "${APPROVAL_BOT_TOKEN:-}" ]] && bridge_url="http://host.docker.internal:8090"
+    openshell sandbox exec -n "$sandbox_name" -- sh -c "mkdir -p /sandbox/.mediator && printf '{\"APPROVAL_BRIDGE_URL\":\"${bridge_url}\",\"INIT_INFERENCE_ENDPOINT\":\"http://host.docker.internal:4000/*\"}' > /sandbox/.mediator/config.json" >/dev/null 2>&1 \
+      && log "Mediator config written to /sandbox/.mediator/config.json" \
+      || log "Warning: failed to write mediator config"
+
     # Inject MEDIATOR_SOCKET/MEDIATOR_TOKEN into the agent's bashrc so
     # the mediator-tools plugin can find the socket. The embedded mediator
     # writes the token file at /sandbox/.mediator/mediator.sock.token.
