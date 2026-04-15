@@ -111,6 +111,9 @@ Sandbox:
   sandbox rebuild                      Rebuild OpenShell binary and hot-deploy (no recreate)
   sandbox ls                           List sandboxes
   sandbox rm [name]                    Delete a sandbox (default: my-assistant)
+  sandbox save <tag>                   Save sandbox workspace to a snapshot
+  sandbox load <tag>                   Restore a snapshot into the current sandbox
+  sandbox snapshots                    List saved snapshots
 
 Options:
   --secrets <backend>          Secrets backend: env (default), keychain
@@ -576,14 +579,100 @@ cmd_sandbox() {
         esac
     done
     case "$sub" in
-        new)    cmd_sandbox_new "$@" ;;
+        new)     cmd_sandbox_new "$@" ;;
         rebuild|deploy) cmd_deploy "$@" ;;
         ls|list) cmd_sandbox_ls ;;
         rm|delete) cmd_sandbox_rm "$@" ;;
+        save)    cmd_sandbox_save "$@" ;;
+        load)    cmd_sandbox_load "$@" ;;
+        snapshots) cmd_sandbox_snapshots ;;
         *)
-            echo "Usage: ./stack.sh sandbox {new|deploy|ls|rm}" >&2
+            echo "Usage: ./stack.sh sandbox {new|rebuild|ls|rm|save|load|snapshots}" >&2
             exit 1 ;;
     esac
+}
+
+cmd_sandbox_save() {
+    export PATH="${CARGO_TARGET_DIR}/release:${PATH}"
+    local tag="${1:?Usage: ./stack.sh sandbox save <tag>}"
+    local sandbox_name="${NEMOCLAW_SANDBOX_NAME:-my-assistant}"
+    local save_dir="${STACK_DATA}/snapshots"
+    local save_path="${save_dir}/${tag}.tar.gz"
+
+    mkdir -p "$save_dir"
+
+    log "Saving sandbox '${sandbox_name}' workspace to ${tag}..."
+    # Tar the workspace PVC contents, following symlinks to capture
+    # .openclaw-data (extensions, skills, credentials, etc.).
+    # Excludes transient files that regenerate on boot.
+    docker exec openshell-cluster-nemoclaw kubectl exec -n openshell "$sandbox_name" -- \
+        tar czf - -C /sandbox -h \
+            --exclude='.mediator/mediator.sock' \
+            --exclude='.mediator/mediator.db-wal' \
+            --exclude='.mediator/mediator.db-shm' \
+            --exclude='.openclaw/logs' \
+            --exclude='node_modules' \
+            --exclude='.npm' \
+            . > "$save_path" 2>/dev/null
+
+    if [[ -f "$save_path" ]]; then
+        local size
+        size=$(du -h "$save_path" | cut -f1)
+        log "Saved: ${save_path} (${size})"
+    else
+        log "Error: save failed"
+        return 1
+    fi
+}
+
+cmd_sandbox_load() {
+    export PATH="${CARGO_TARGET_DIR}/release:${PATH}"
+    local tag="${1:?Usage: ./stack.sh sandbox load <tag>}"
+    local sandbox_name="${NEMOCLAW_SANDBOX_NAME:-my-assistant}"
+    local save_dir="${STACK_DATA}/snapshots"
+    local save_path="${save_dir}/${tag}.tar.gz"
+
+    if [[ ! -f "$save_path" ]]; then
+        log "Error: snapshot '${tag}' not found at ${save_path}"
+        echo "Available snapshots:"
+        ls -1 "${save_dir}"/*.tar.gz 2>/dev/null | xargs -I{} basename {} .tar.gz | sed 's/^/  /'
+        return 1
+    fi
+
+    # Check if sandbox exists
+    if ! openshell sandbox list 2>/dev/null | grep -q "$sandbox_name"; then
+        log "Error: sandbox '${sandbox_name}' not found. Run './stack.sh sandbox new' first."
+        return 1
+    fi
+
+    log "Loading snapshot '${tag}' into sandbox '${sandbox_name}'..."
+    # Extract into the workspace PVC
+    cat "$save_path" | docker exec -i openshell-cluster-nemoclaw \
+        kubectl exec -n openshell "$sandbox_name" -i -- \
+        tar xzf - -C /sandbox 2>/dev/null
+
+    if [[ $? -eq 0 ]]; then
+        log "Snapshot loaded. Restart the sandbox to apply:"
+        log "  ./stack.sh sandbox rebuild"
+    else
+        log "Error: load failed"
+        return 1
+    fi
+}
+
+cmd_sandbox_snapshots() {
+    local save_dir="${STACK_DATA}/snapshots"
+    if [[ -d "$save_dir" ]] && ls "${save_dir}"/*.tar.gz >/dev/null 2>&1; then
+        echo "Saved snapshots:"
+        for f in "${save_dir}"/*.tar.gz; do
+            local tag size
+            tag=$(basename "$f" .tar.gz)
+            size=$(du -h "$f" | cut -f1)
+            echo "  ${tag}  (${size})"
+        done
+    else
+        echo "No snapshots saved. Use: ./stack.sh sandbox save <tag>"
+    fi
 }
 
 cmd_sandbox_ls() {
