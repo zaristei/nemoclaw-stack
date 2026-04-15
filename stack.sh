@@ -109,8 +109,9 @@ Infrastructure:
 Sandbox:
   sandbox new [--boot-prompt <file>]   Create sandbox, onboard NemoClaw, configure mediator
   sandbox rebuild                      Rebuild OpenShell binary and hot-deploy (no recreate)
+  sandbox stop [name]                  Stop sandbox without deleting (preserves PVC)
   sandbox ls                           List sandboxes
-  sandbox rm [name]                    Delete a sandbox (default: my-assistant)
+  sandbox rm [name]                    Delete sandbox and PVC
   sandbox save <tag>                   Save sandbox workspace to a snapshot
   sandbox load <tag>                   Restore a snapshot into the current sandbox
   sandbox snapshots                    List saved snapshots
@@ -586,8 +587,9 @@ cmd_sandbox() {
         save)    cmd_sandbox_save "$@" ;;
         load)    cmd_sandbox_load "$@" ;;
         snapshots) cmd_sandbox_snapshots ;;
+        stop)    cmd_sandbox_stop "$@" ;;
         *)
-            echo "Usage: ./stack.sh sandbox {new|rebuild|ls|rm|save|load|snapshots}" >&2
+            echo "Usage: ./stack.sh sandbox {new|rebuild|stop|ls|rm|save|load|snapshots}" >&2
             exit 1 ;;
     esac
 }
@@ -680,10 +682,25 @@ cmd_sandbox_ls() {
     openshell sandbox list 2>/dev/null
 }
 
+cmd_sandbox_stop() {
+    export PATH="${CARGO_TARGET_DIR}/release:${PATH}"
+    local name="${1:-${NEMOCLAW_SANDBOX_NAME:-my-assistant}}"
+    log "Stopping sandbox ${name} (preserving PVC)..."
+    # Scale the sandbox pod to 0 replicas — keeps the PVC and sandbox resource
+    # but stops the container. `sandbox new` or `sandbox rebuild` will bring it back.
+    docker exec openshell-cluster-nemoclaw kubectl delete pod "$name" -n openshell --wait=false 2>/dev/null
+    # Prevent the controller from recreating the pod by scaling down
+    docker exec openshell-cluster-nemoclaw kubectl scale --replicas=0 \
+        "$(docker exec openshell-cluster-nemoclaw kubectl get deploy,statefulset,replicaset -n openshell -o name 2>/dev/null | grep -i "$name" | head -1)" \
+        -n openshell 2>/dev/null \
+      || log "  (pod deleted — controller may recreate it)"
+    log "Sandbox stopped."
+}
+
 cmd_sandbox_rm() {
     export PATH="${CARGO_TARGET_DIR}/release:${PATH}"
     local name="${1:-${NEMOCLAW_SANDBOX_NAME:-my-assistant}}"
-    log "Deleting sandbox ${name}..."
+    log "Deleting sandbox ${name} (removes PVC)..."
     openshell sandbox delete "$name" 2>&1
 }
 
