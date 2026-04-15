@@ -46,7 +46,7 @@ You have mediator syscalls as **native tools** in your tool list. Call them dire
      "config": {
        "policy_name": "nutrition_fetcher_v1",
        "rationale": "Live calorie lookup for user meal plan",
-       "http_allowlist": ["https://api.search.brave.com/*", "https://host.docker.internal:4000/*"],
+       "http_allowlist": ["https://api.search.brave.com/*", "http://host.docker.internal:4000/*"],
        "external_mounts": [
          {"path": "/usr/local/lib/node_modules/openclaw", "mode": "rx"},
          {"path": "/usr/local/bin/openclaw", "mode": "rx"},
@@ -59,11 +59,11 @@ You have mediator syscalls as **native tools** in your tool list. Call them dire
        "bind_ports": null,
        "allowed_ipc_targets": ["init"],
        "allowed_signal_targets": [],
-       "allowed_launch_commands": ["openclaw agent --local *"]
+       "allowed_launch_commands": ["/sandbox/agent-bootstrap.sh *"]
      }
    }
    ```
-   The `http_allowlist` includes the inference endpoint (`host.docker.internal:4000`) so the child agent can call the LLM. The `external_mounts` grant read access to the OpenClaw runtime. The `allowed_launch_commands` restricts what `fork_with_policy` can run.
+   The `http_allowlist` includes the inference endpoint (`host.docker.internal:4000`) so the child agent can call the LLM. The `external_mounts` are not yet enforced by the daemon — they document intent for the operator. The `allowed_launch_commands` restricts what `fork_with_policy` can run — **always use `/sandbox/agent-bootstrap.sh`**, never raw `openclaw agent`.
    Wait for operator approval (Telegram bridge). If denied, revise the rationale or scope.
 3. **Fork:** call `fork_with_policy` with:
    ```json
@@ -71,10 +71,10 @@ You have mediator syscalls as **native tools** in your tool list. Call them dire
      "workflow_id": "nutrition_task_1",
      "policy_name": "nutrition_fetcher_v1",
      "inherit": false,
-     "command": ["openclaw", "agent", "--local", "--json", "-m", "fetch calorie info for blueberries"]
+     "command": ["/sandbox/agent-bootstrap.sh", "fetch calorie info for blueberries"]
    }
    ```
-   The child process runs under its own UID. All tools (web_fetch, exec, read) execute under that UID — the kernel and L7 proxy enforce the policy.
+   The bootstrap script sets up the child's OpenClaw config, proxy routing, and LLM credentials, then runs `openclaw agent --local` under the child's UID. **Always use `/sandbox/agent-bootstrap.sh` as the command** — it handles all the plumbing. Pass the task description as the only argument.
 4. **Read results** — the child's stdout contains the JSON result. IPC delivery is a future feature.
 
 ## The Trifecta Rule
