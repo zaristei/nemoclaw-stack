@@ -713,6 +713,12 @@ cmd_sandbox_new() {
         set -a; source "${SCRIPT_DIR}/.env"; set +a
     fi
 
+    # Don't leak BRAVE_API_KEY to NemoClaw onboard — init should NOT have
+    # web search in its base policy. The key is injected post-creation by
+    # _setup_mediator so it's available to child agents only.
+    local _saved_brave_key="${BRAVE_API_KEY:-}"
+    unset BRAVE_API_KEY
+
     # ── NemoClaw: install dependencies ──────────────────────────────────────
     local lock="${NEMOCLAW_DIR}/node_modules/.package-lock.json"
     if [[ ! -f "$lock" ]] || [[ "${NEMOCLAW_DIR}/package.json" -nt "$lock" ]]; then
@@ -768,6 +774,9 @@ cmd_sandbox_new() {
             run_onboard
         fi
     fi
+
+    # Restore BRAVE_API_KEY for _setup_mediator (injected into child config only)
+    [[ -n "$_saved_brave_key" ]] && export BRAVE_API_KEY="$_saved_brave_key"
 
     # The mediator daemon runs embedded in the OpenShell supervisor (PID 1).
     # No standalone binaries to upload. Only the agent-bootstrap script and
