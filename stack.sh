@@ -526,17 +526,7 @@ cmd_start() {
     fi
 
     # ── OpenShell: build cluster image ──────────────────────────────────────
-    # Use a hash of the sandbox crate source to bust the Docker cargo cache
-    # when code changes. Without this, BuildKit reuses stale compilation
-    # artifacts and the binary in the image doesn't include our changes.
-    local src_hash
-    src_hash=$(find "${OPENSHELL_DIR}/crates/openshell-sandbox/src" -name '*.rs' -exec md5 -q {} + 2>/dev/null | md5 -q 2>/dev/null || echo "default")
-    log "Building OpenShell cluster image (source hash: ${src_hash:0:8})..."
-    (
-        cd "${OPENSHELL_DIR}"
-        CARGO_TARGET_CACHE_SCOPE="${src_hash}" IMAGE_TAG=local \
-            mise exec -- ./tasks/scripts/docker-build-image.sh cluster
-    )
+    _build_cluster_image
 
     # ── Layer NemoClaw plugin (with mediator tools) on top ────────────────
     # The base cluster image has OpenClaw but not the NemoClaw plugin.
@@ -998,15 +988,8 @@ cmd_deploy() {
 
     local sandbox_name="${NEMOCLAW_SANDBOX_NAME:-my-assistant}"
 
-    # 1. Rebuild cluster image with cache-busted sandbox binary
-    local src_hash
-    src_hash=$(find "${OPENSHELL_DIR}/crates/openshell-sandbox/src" -name '*.rs' -exec md5 -q {} + 2>/dev/null | md5 -q 2>/dev/null || echo "$(date +%s)")
-    log "Building OpenShell cluster image (source hash: ${src_hash:0:8})..."
-    (
-        cd "${OPENSHELL_DIR}"
-        CARGO_TARGET_CACHE_SCOPE="${src_hash}" IMAGE_TAG=local \
-            mise exec -- ./tasks/scripts/docker-build-image.sh cluster
-    )
+    # 1. Rebuild cluster image (prunes Docker cache if source changed)
+    _build_cluster_image
 
     # 2. Layer NemoClaw plugin
     local nemoclaw_plugin_src
@@ -1165,6 +1148,37 @@ json.dump(cfg, open('/sandbox/.openclaw/openclaw.json', 'w'), indent=2)
             fi
         fi
     fi
+}
+
+# ── Build helpers ────────────────────────────────────────────────────────────
+
+# Build the OpenShell cluster image, pruning Docker build cache when the
+# sandbox source hash changes from the last successful build.
+_build_cluster_image() {
+    local src_hash last_hash_file="${STACK_DATA}/state/last-sandbox-hash"
+    src_hash=$(find "${OPENSHELL_DIR}/crates/openshell-sandbox/src" -name '*.rs' -exec md5 -q {} + 2>/dev/null | md5 -q 2>/dev/null || echo "default")
+
+    # If source changed since last build, prune Docker build cache to force
+    # recompilation. BuildKit's layer cache won't invalidate on --mount=type=cache
+    # scope changes alone — the layer inputs (COPYd files) must differ, or the
+    # entire build cache must be purged.
+    local last_hash=""
+    [[ -f "$last_hash_file" ]] && last_hash=$(cat "$last_hash_file")
+    if [[ "$src_hash" != "$last_hash" ]]; then
+        log "Source changed (${last_hash:0:8} → ${src_hash:0:8}), pruning Docker build cache..."
+        docker buildx prune --all --force >/dev/null 2>&1
+    fi
+
+    log "Building OpenShell cluster image (source hash: ${src_hash:0:8})..."
+    (
+        cd "${OPENSHELL_DIR}"
+        CARGO_TARGET_CACHE_SCOPE="${src_hash}" IMAGE_TAG=local \
+            mise exec -- ./tasks/scripts/docker-build-image.sh cluster
+    )
+
+    # Save hash on success
+    mkdir -p "$(dirname "$last_hash_file")"
+    echo "$src_hash" > "$last_hash_file"
 }
 
 # ── Helpers ──────────────────────────────────────────────────────────────────
