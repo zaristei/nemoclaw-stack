@@ -68,6 +68,20 @@ agent_list.append({
 for key in ['channels', 'gateway', 'plugins']:
     cfg.pop(key, None)
 
+# Inject Brave Search key if available (stored by stack.sh, not in base config)
+import os
+brave_key = ''
+for kf in ['/sandbox/.mediator/brave.key']:
+    try:
+        brave_key = open(kf).read().strip()
+        if brave_key: break
+    except: pass
+if brave_key:
+    cfg.setdefault('tools', {}).setdefault('web', {})['search'] = {
+        'enabled': True, 'provider': 'brave', 'apiKey': brave_key
+    }
+    cfg['tools']['web']['fetch'] = {'enabled': True}
+
 with open('$OC_DIR/openclaw.json', 'w') as f:
     json.dump(cfg, f, indent=2)
 print('Config written', file=sys.stderr)
