@@ -1116,15 +1116,26 @@ MCONF
           || log "Warning: failed to write LiteLLM key"
     fi
 
-    # Write Brave Search API key for child agents (NOT into the gateway config).
-    # The key is stored in a file that agent-bootstrap.sh reads when setting up
-    # child OpenClaw configs. Init does NOT get web search — it must propose a
-    # child policy and get operator approval first.
+    # Store Brave Search API key in the gateway config AND in a mediator file
+    # for child agents. The key in openclaw.json is harmless — the L7 proxy
+    # blocks api.search.brave.com for init unless the brave preset is applied.
+    # Child agents get the key via agent-bootstrap.sh reading brave.key.
     if [[ -n "${BRAVE_API_KEY:-}" ]]; then
         docker exec openshell-cluster-nemoclaw kubectl exec -n openshell "$sandbox_name" -- \
+            python3 -c "
+import json
+cfg = json.load(open('/sandbox/.openclaw/openclaw.json'))
+cfg.setdefault('tools', {}).setdefault('web', {})['search'] = {
+    'enabled': True, 'provider': 'brave',
+    'apiKey': '${BRAVE_API_KEY}'
+}
+cfg['tools']['web']['fetch'] = {'enabled': True}
+json.dump(cfg, open('/sandbox/.openclaw/openclaw.json', 'w'), indent=2)
+" >/dev/null 2>&1
+        docker exec openshell-cluster-nemoclaw kubectl exec -n openshell "$sandbox_name" -- \
             sh -c "echo '${BRAVE_API_KEY}' > /sandbox/.mediator/brave.key && chmod 644 /sandbox/.mediator/brave.key" >/dev/null 2>&1 \
-          && log "Brave Search key stored (child agents only)" \
-          || log "Warning: failed to store Brave key"
+          && log "Brave Search key configured" \
+          || log "Warning: failed to configure Brave key"
     fi
 
     # Inject MEDIATOR_SOCKET/MEDIATOR_TOKEN into bashrc
