@@ -24,9 +24,23 @@ Reduces boilerplate in policy proposals. Instead of specifying http_allowlist, m
 
 When upstream profiles ship, map them to MediationPolicy templates. policy_propose gains an optional `profile` field that pre-fills config from a profile. The operator still approves — profiles reduce friction, not bypass approval.
 
-## IPC result delivery
+## IPC result delivery (ipc_recv)
 
-Children can't send data back to the parent. The agent identified this correctly during Telegram testing. Options: read child stdout from instance dir, or implement ipc_recv/ipc_reply.
+Children can't send data back to the parent. Direct file reads bypass scrubbers and propagate taint. The correct pattern is message-queue style IPC with scrubbers in the path:
+
+1. Child calls `ipc_send` with result after task completes
+2. Message passes through the policy's configured scrubber (`de_taints: true` scrubbers break the taint chain)
+3. Parent calls `ipc_recv` (new syscall) to read the scrubbed message
+
+The bootstrap script should auto-send the child's stdout via `ipc_send` on exit. `ipc_connect` (socket pair / bidirectional stream) is for real-time collaboration between concurrent agents, not async result delivery.
+
+## Registerable scrubbers
+
+The 8 built-in scrubbers (regex_pii, field_pii, ner_pii, schema_enforcer, canary, delimiter, instruction_strip, passthrough) are hardcoded. Agents and operators should be able to register new scrubbers via a proposal flow, similar to policy_propose.
+
+A `scrubber_propose` syscall would let an agent define a custom scrubber (e.g. a domain-specific PII filter, a format converter, or a content classifier) and attach it to an IPC channel. The operator approves the scrubber definition, which includes: name, type (wasm? regex set? JSON schema?), whether it `de_taints`, and the scrubber code/config itself.
+
+This matters because the trifecta rule depends on scrubbers to break taint chains. If the only scrubbers are the 8 built-ins, agents are limited to generic patterns. Custom scrubbers let agents propose task-specific data gates — e.g. "only pass through fields matching this JSON schema" or "strip everything except the nutritional data table."
 
 ## external_mounts enforcement
 
