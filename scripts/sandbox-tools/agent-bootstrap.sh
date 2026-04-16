@@ -23,8 +23,6 @@ OC_DIR="${HOME}/.openclaw"
 
 # Create dirs (child UID owns workflow dir via daemon chown)
 mkdir -p "$POLICY_WORKSPACE" "$AGENT_DIR/sessions" "$OC_DIR" 2>/dev/null
-# Shared results directory — children write output here, parent reads it
-mkdir -p /sandbox/.mediator/results 2>/dev/null
 
 # Build the child's config JSON. Start from the base config but:
 # 1. Patch inference.local → host.docker.internal:4000 (child can't resolve internal hostname)
