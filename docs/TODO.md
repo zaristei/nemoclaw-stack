@@ -24,9 +24,13 @@ Reduces boilerplate in policy proposals. Instead of specifying http_allowlist, m
 
 When upstream profiles ship, map them to MediationPolicy templates. policy_propose gains an optional `profile` field that pre-fills config from a profile. The operator still approves — profiles reduce friction, not bypass approval.
 
-## IPC result delivery (ipc_recv)
+## IPC result delivery (ipc_recv) — currently using file-based MVP
 
-Children can't send data back to the parent. Direct file reads bypass scrubbers and propagate taint. The correct pattern is message-queue style IPC with scrubbers in the path:
+**MVP (current):** Children write results to `/sandbox/.mediator/results/<workflow_id>.json`. Parent reads the file after child exits. No scrubbers in the path — taint propagates. Acceptable for now because the parent explicitly asked for this data.
+
+**Target architecture:** Scrubber processes as Unix-style filters. The mediator pipes IPC messages through a scrubber process (running under its own UID/policy) before delivering to the parent. `ipc_send` and `ipc_connect` are disabled until this is built.
+
+Children can't send data back to the parent via IPC. Direct file reads bypass scrubbers and propagate taint. The correct pattern is message-queue style IPC with scrubbers in the path:
 
 1. Child calls `ipc_send` with result after task completes
 2. Message passes through the policy's configured scrubber (`de_taints: true` scrubbers break the taint chain)
