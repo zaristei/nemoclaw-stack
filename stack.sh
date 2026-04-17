@@ -1087,10 +1087,11 @@ _setup_mediator() {
     [[ -n "${APPROVAL_BOT_TOKEN:-}" ]] && bridge_url="http://host.docker.internal:8090"
 
     # Write mediator config.json via kubectl exec (avoids openshell sandbox exec quoting issues)
+    local ws="${WEBHOOK_SECRET:-}"
     docker exec openshell-cluster-nemoclaw kubectl exec -n openshell "$sandbox_name" -- sh -c "
 mkdir -p /sandbox/.mediator
 cat > /sandbox/.mediator/config.json << 'MCONF'
-{\"APPROVAL_BRIDGE_URL\":\"${bridge_url}\",\"INIT_INFERENCE_ENDPOINT\":\"http://host.docker.internal:4000/*\"}
+{\"APPROVAL_BRIDGE_URL\":\"${bridge_url}\",\"INIT_INFERENCE_ENDPOINT\":\"http://host.docker.internal:4000/*\",\"WEBHOOK_SECRET\":\"${ws}\"}
 MCONF
 " >/dev/null 2>&1 \
       && log "Mediator config written" \
