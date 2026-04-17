@@ -25,7 +25,10 @@ STACK_DATA="${STACK_ROOT}/nemoclaw-stack"
 
 # ── Paths ────────────────────────────────────────────────────────────────────
 export COLIMA_HOME="${STACK_DATA}/colima"
-export DOCKER_HOST="unix://${COLIMA_HOME}/default/docker.sock"
+# Colima honors XDG_CONFIG_HOME over COLIMA_HOME for the socket path in
+# newer versions, so we use that path consistently. XDG_CONFIG_HOME is
+# set below to a path under STACK_DATA.
+export DOCKER_HOST="unix://${STACK_DATA}/config/colima/default/docker.sock"
 export XDG_CONFIG_HOME="${STACK_DATA}/config"
 export NEMOCLAW_HOME="${STACK_DATA}/state/nemoclaw"
 export CARGO_TARGET_DIR="${STACK_DATA}/build/openshell/target"
