@@ -386,7 +386,7 @@ cmd_start() {
     rm -f "${COLIMA_HOME}/ssh_config" 2>/dev/null || true
     if ! colima status &>/dev/null; then
         log "Starting Colima (6 CPU / 8GB)..."
-        colima start --cpu "${COLIMA_CPU:-6}" --memory "${COLIMA_MEMORY:-8}"
+        colima start --vm-type vz --cpu "${COLIMA_CPU:-6}" --memory "${COLIMA_MEMORY:-8}"
     fi
     chmod 644 "${COLIMA_HOME}/ssh_config" 2>/dev/null || true
 
@@ -1168,7 +1168,8 @@ _build_cluster_image() {
     [[ -f "$last_hash_file" ]] && last_hash=$(cat "$last_hash_file")
     if [[ "$src_hash" != "$last_hash" ]]; then
         log "Source changed (${last_hash:0:8} → ${src_hash:0:8}), pruning Docker build cache..."
-        docker buildx prune --all --force >/dev/null 2>&1
+        # prune can return non-zero even when it succeeds; don't kill the script
+        docker buildx prune --all --force >/dev/null 2>&1 || true
     fi
 
     log "Building OpenShell cluster image (source hash: ${src_hash:0:8})..."
