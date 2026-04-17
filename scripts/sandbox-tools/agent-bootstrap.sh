@@ -110,5 +110,12 @@ export NODE_TLS_REJECT_UNAUTHORIZED=0
 export NODE_USE_ENV_PROXY=1
 export UNDICI_PROXY_URL="http://10.200.0.1:3128"
 
+# Export the Brave Search API key from the key file so the child agent
+# can include it in web_fetch headers (web_search reads it from openclaw.json
+# via tools.web.search.apiKey, but web_fetch needs the env var).
+if [ -r /sandbox/.mediator/brave.key ]; then
+    export BRAVE_API_KEY="$(cat /sandbox/.mediator/brave.key)"
+fi
+
 # Run the agent turn. --local runs in-process (no gateway needed).
 exec openclaw agent --agent "$WORKFLOW_ID" --local -m "$1" --json
