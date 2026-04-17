@@ -8,6 +8,16 @@ metadata: { "openclaw": { "emoji": "🛡️", "always": true } }
 
 You have mediator syscalls as **native tools** in your tool list. Call them directly — they work exactly like `web_search` or `read`. Do NOT use `exec`, `/sandbox/mediator-cli`, or shell commands.
 
+## ⚠️ NON-NEGOTIABLE RULE
+
+**Every policy whose `allowed_launch_commands` includes `/sandbox/agent-bootstrap.sh` MUST have `http://host.docker.internal:4000/*` in its `http_allowlist`.**
+
+This is the LiteLLM inference endpoint. The child agent spawned by `agent-bootstrap.sh` runs `openclaw agent --local` which calls LiteLLM for every reasoning step. Without it, every child fails with "LLM request failed: network connection error" and nothing gets done.
+
+This endpoint is NOT the upstream provider (Anthropic, OpenAI, etc.) — LiteLLM is the middleman. Your child only talks to LiteLLM; LiteLLM talks to the upstream.
+
+If you propose a policy without this endpoint, the operator should reject it.
+
 ## When to Use
 
 - User wants live web data and you don't have web search → `policy_propose` a child with HTTP access
