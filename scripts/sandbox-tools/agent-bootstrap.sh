@@ -105,6 +105,10 @@ export http_proxy="http://10.200.0.1:3128"
 export https_proxy="http://10.200.0.1:3128"
 export NO_PROXY="localhost,127.0.0.1,10.200.0.1"
 export NODE_TLS_REJECT_UNAUTHORIZED=0
+# Node.js undici (the fetch backend used by OpenClaw's web_search/web_fetch)
+# does NOT honor HTTP_PROXY by default. These env vars enable it.
+export NODE_USE_ENV_PROXY=1
+export UNDICI_PROXY_URL="http://10.200.0.1:3128"
 
 # Run the agent turn. --local runs in-process (no gateway needed).
 exec openclaw agent --agent "$WORKFLOW_ID" --local -m "$1" --json
