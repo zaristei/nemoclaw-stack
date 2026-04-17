@@ -381,10 +381,12 @@ cmd_start() {
     mkdir -p "$STACK_DATA"
 
     # ── Colima ──────────────────────────────────────────────────────────────
+    # 6 CPU / 8GB leaves 4 cores + 8GB for macOS to avoid CPU starvation
+    # panics (WDT timeout) during heavy Rust cross-compilation.
     rm -f "${COLIMA_HOME}/ssh_config" 2>/dev/null || true
     if ! colima status &>/dev/null; then
-        log "Starting Colima..."
-        colima start
+        log "Starting Colima (6 CPU / 8GB)..."
+        colima start --cpu "${COLIMA_CPU:-6}" --memory "${COLIMA_MEMORY:-8}"
     fi
     chmod 644 "${COLIMA_HOME}/ssh_config" 2>/dev/null || true
 
@@ -1170,9 +1172,13 @@ _build_cluster_image() {
     fi
 
     log "Building OpenShell cluster image (source hash: ${src_hash:0:8})..."
+    # Cap cargo parallelism to avoid starving macOS CPU 0 (previous panics
+    # were WDT timeouts during heavy cross-compilation). Leaves host cores
+    # for the Virtualization.framework to service the VM responsively.
     (
         cd "${OPENSHELL_DIR}"
         CARGO_TARGET_CACHE_SCOPE="${src_hash}" IMAGE_TAG=local \
+            CARGO_BUILD_JOBS="${CARGO_BUILD_JOBS:-4}" \
             mise exec -- ./tasks/scripts/docker-build-image.sh cluster
     )
 
