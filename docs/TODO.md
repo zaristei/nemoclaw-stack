@@ -102,3 +102,20 @@ Target: add a second enforcement layer via per-UID Landlock applied in `Command:
 Non-trivial piece: the child's Landlock ruleset must preserve the sandbox's baseline paths (`/usr`, `/lib`, `/bin`, workspace init files, etc.) so `exec` and runtime linking continue to work, while narrowing the user-visible paths to the child's declared `external_mounts`. Upstream's existing `landlock.rs::prepare` takes a `SandboxPolicy`; we'd synthesize one per child as `(sandbox.read_only + sandbox.read_write) ∪ (child.external_mounts narrowed by mode)`. Apply via `restrict_self` in a `pre_exec` closure before the `setpriv` exec.
 
 Blockers: none. All the plumbing is in place (subset check gates the child's requested paths at propose time; sandbox's baseline Landlock is already applied at startup). This is strictly a code increment on `fork_with_policy::setup_instance_dir` + `child_runner::spawn_child_process` plus tests that a child actually sees ENOENT on a peer's dir.
+
+## Bake gateway image tarball into cluster image for k3s auto-import
+
+The earlier TODO ("gateway-start blocker on simplified-mediator spike") covered step 1: getting the CLUSTER image visible to `bollard.inspect_image` via `docker save | docker load` round-trip. Step 2 surfaced when version bumps to 0.0.33: the cluster container's embedded k3s separately needs `ghcr.io/nvidia/openshell/gateway:<version>` to run the openshell-0 pod, and that image isn't in the k3s containerd at startup. k3s tries to pull it from `ghcr.io/nvidia/openshell/gateway:<version>`, fails with "not found" for any locally-built version, and the cluster never becomes healthy.
+
+Proper fix: bake the gateway image tarball into the cluster image at `/var/lib/rancher/k3s/agent/images/gateway-<version>.tar`. k3s containerd auto-imports every tarball in that directory at startup before trying to pull. One-time cost paid at cluster-image build, zero cost at every cluster-container start.
+
+Implementation sketch for stack.sh:
+
+1. Before `_build_cluster_image`, build the gateway image: `mise exec -- ./tasks/scripts/docker-build-image.sh gateway` → produces `openshell/gateway:dev` tag (or `local` depending on IMAGE_TAG env).
+2. Retag + save to `$STACK_DATA/state/gateway.tar`.
+3. Modify the cluster image build to accept a `GATEWAY_TAR` build-arg pointing at the tar, and add a `COPY --from=tarball-stage /gateway.tar /var/lib/rancher/k3s/agent/images/gateway-${VERSION}.tar` layer. Or generate a thin local Dockerfile that FROM's the upstream cluster image and just adds that COPY; retag the result as `ghcr.io/nvidia/openshell/cluster:<version>`.
+4. Updated `_build_cluster_image` function in stack.sh wraps all of the above.
+
+The intermediate manual workaround we used during the Phase C/D smoke attempt: `docker cp gateway.tar` into the running cluster + `ctr --namespace=k8s.io image import` — racy, fails when gateway-start's retry loop destroys the cluster before the import lands.
+
+Once this TODO lands, `./stack.sh sandbox new` on a fresh branch should Just Work without any manual `save | load` or `ctr import` dance. Unblocks runtime validation of all future mediator work.
