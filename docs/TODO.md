@@ -82,3 +82,13 @@ if (uri) setGlobalDispatcher(new ProxyAgent({ uri, requestTls: { rejectUnauthori
 Inject in `scripts/sandbox-tools/agent-bootstrap.sh` via `export NODE_OPTIONS='--require /sandbox/undici-proxy-preload.js'` before `exec openclaw agent`. Every undici call in the child OpenClaw process (including `web_fetch`'s SSRF-guarded path) routes through our L7 proxy, and the proxy does the DNS resolution.
 
 Also file upstream issue with OpenClaw: request that `web_fetch`'s SSRF-guarded fetch dispatcher honor `NODE_USE_ENV_PROXY` / `HTTPS_PROXY` the same way media-understanding now does (post-`#52162`). The monkey-patch becomes dead code once upstream merges the fix.
+
+## Hybrid data-flow classification: explicit tags override TrustSpec heuristics
+
+The simplified mediator launches with shape-inference classification only — `trust_spec.rs` reads a sandbox-level `TrustSpec` config that maps hosts and paths to data-flow classes (pii / non_pii, trusted / untrusted, internal / external). Every policy's endpoints and mounts get classified by matching against this config. The wizard and operator have no way to assert "this specific endpoint is trusted in this context despite its shape," which means borderline cases either require editing the global `TrustSpec` or getting the heuristic to match by luck.
+
+Target: extend `NetworkEndpoint` and every filesystem entry in the policy schema with an optional `data_flow: { sensitivity, trust, locality }` block. When present on a node, the analyzer uses those values and skips the TrustSpec lookup for that node. When absent, fall back to TrustSpec-based inference (today's behavior).
+
+Wizard UX: the wizard's system prompt already knows the three axes; it just needs to emit the block into the YAML when a case warrants an explicit override. Presets become simpler to author: each preset endpoint can declare its `data_flow` once, and every proposal referencing that preset inherits the tags.
+
+Migration: purely additive. Existing policies without tags continue to classify via TrustSpec; new policies can opt in per-endpoint. No schema break, no operator retraining required.
