@@ -1,7 +1,42 @@
 # Mediator Design Decisions
 
-Architectural decisions from the design conversation (April 2026) that inform
-the implementation of the 9-syscall mediator in OpenShell.
+> **Historical document — preserves the reasoning, not the current schema.**
+>
+> This file captures the original April 2026 design conversation that produced
+> the 10-syscall mediator with scrubbers, IPC, and policy inheritance. Many of
+> those specifics were dropped or reworked during the simplification pass
+> (see `docs/TODO.md` and the plan file for the current state). In particular:
+>
+> - **7 syscalls now**, not 10. Dropped: `ipc_send`, `ipc_connect`,
+>   `request_port`. Retained: `policy_propose`, `fork_with_policy`, `signal`,
+>   `policy_list`, `policy_get`, `revoke_policy`, `mediator_ps`.
+> - **Policy inheritance removed.** Every proposed policy subset-checks
+>   against the live sandbox policy directly. No `inherit` field on
+>   `fork_with_policy` wire schema.
+> - **Built-in scrubbers removed.** Agents write their own scrubber scripts
+>   as child workflows when content sanitization is needed. The fetcher →
+>   scrubber decomposition pattern survives, but the scrubber is a user-
+>   defined Python/bash script, not a mediator-internal filter.
+> - **Subset check added** at propose time: filesystem `external_mounts`
+>   must be subpaths of the sandbox's `FilesystemPolicy` ceiling.
+>   Auto-denied otherwise with structured `subset_check_failed: ...`.
+> - **Policy wizard added** as a consultation agent. Any caller whose
+>   policy admits `wizard_v1` can fork it to draft proposals.
+> - **Two Telegram bots** split the operator UX: policy channel carries
+>   proposals + wizard conversations; runtime channel carries fork +
+>   lifecycle telemetry.
+>
+> The **reasoning** below — why we picked UIDs over namespaces, why the
+> mediator is embedded in PID 1 not a separate daemon, why operator
+> approval is structural not behavioral — is still load-bearing. The
+> specific API surface has moved on; read `skills/mediator/SKILL.md` or
+> `docs/agent-syscall-guide.md` for the current syscall surface before
+> designing anything new.
+
+## Original design rationale (historical)
+
+Architectural decisions from the design conversation (April 2026) that informed
+the original 10-syscall mediator design.
 
 ## Core Principle
 

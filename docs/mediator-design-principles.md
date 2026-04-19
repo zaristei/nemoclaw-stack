@@ -4,6 +4,22 @@
 **Author:** Zack Aristei
 **Date:** April 2026
 
+> **Historical document — principles still apply, specifics have drifted.**
+>
+> The principles below (agent reasons / sandbox evaluates / operator approves;
+> per-process policies; trifecta as design guardrail; operator approval is
+> structural) are all still in force. The specific mechanisms described
+> (scrubbers, IPC syscalls, inheritance) have been simplified out. See
+> `skills/mediator/SKILL.md` and the plan file for the current surface;
+> `docs/mediator-design-decisions.md` has the full changelog of what dropped.
+>
+> Notable mechanism changes since this document was written:
+> - Scrubbers are no longer a mediator primitive; agents write their own
+>   scrubber scripts as child workflows
+> - IPC syscalls removed; coordination happens via shared policy workspace files
+> - Policy inheritance removed; flat subset model against sandbox ceiling
+> - Policy wizard added as a consultative agent for drafting proposals
+
 ---
 
 ## The Problem: Resource Access is Coupled to the Sandbox
