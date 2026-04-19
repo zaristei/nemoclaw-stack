@@ -43,6 +43,22 @@ LISTEN_HOST = os.environ.get("LISTEN_HOST", "0.0.0.0")
 LISTEN_PORT = int(os.environ.get("LISTEN_PORT", "8090"))
 
 # ---------------------------------------------------------------------------
+# Runtime bot configuration (optional second bot for fork notifications,
+# workflow lifecycle events, and other non-approval runtime telemetry).
+#
+# When RUNTIME_BOT_TOKEN is unset, runtime events fall back to the same
+# (policy) bot so single-bot deployments continue to work. When set,
+# runtime events go to the runtime bot handle on (optionally) a separate
+# chat. Operator adds both bots to the same chat in the two-bot split;
+# messages look different because the From handle differs.
+# ---------------------------------------------------------------------------
+
+RUNTIME_BOT_TOKEN = os.environ.get("RUNTIME_BOT_TOKEN", "")
+RUNTIME_CHAT_ID = int(
+    os.environ.get("RUNTIME_CHAT_ID", "0") or str(TELEGRAM_CHAT_ID)
+)
+
+# ---------------------------------------------------------------------------
 # In-memory pending decisions
 # ---------------------------------------------------------------------------
 
@@ -92,6 +108,8 @@ async def handle_webhook(request: web.Request) -> web.Response:
     event = payload.get("event", "")
     if event == "mediator_policy_proposal":
         return await _handle_policy_proposal(request, payload)
+    if event == "mediator_fork":
+        return await _handle_fork_notification(request, payload)
     if event == "mediator_syscall_approval":
         # Auto-approve init syscall gate (stale daemon binary still has the
         # per-syscall gate that was removed in source). Store the approval
@@ -286,6 +304,59 @@ def _escape(text: str) -> str:
         .replace("<", "&lt;")
         .replace(">", "&gt;")
     )
+
+
+# ---------------------------------------------------------------------------
+# Runtime event handler — fork_with_policy notifications, workflow lifecycle,
+# signal events. These are INFORMATIONAL (not approval prompts); they post
+# to the runtime bot handle + chat, separate from the policy channel where
+# proposals and wizard conversations live.
+#
+# When RUNTIME_BOT_TOKEN is unset, runtime events fall back to the policy
+# bot so single-bot deployments continue working.
+# ---------------------------------------------------------------------------
+
+
+async def _handle_fork_notification(
+    request: web.Request, payload: dict[str, Any]
+) -> web.Response:
+    """Post a fork_with_policy audit event to the runtime channel."""
+    caller_workflow = payload.get("caller_workflow_id", "?")
+    caller_policy = payload.get("caller_policy", "?")
+    child_workflow = payload.get("workflow_id", "?")
+    child_policy = payload.get("policy_name", "?")
+    child_uid = payload.get("uid", "?")
+    command = payload.get("command", [])
+    command_str = " ".join(command[:5]) + ("..." if len(command) > 5 else "")
+
+    app_runtime = request.app.get("runtime_app") or request.app["telegram_app"]
+    chat_id = RUNTIME_CHAT_ID if app_runtime is request.app.get("runtime_app") else TELEGRAM_CHAT_ID
+
+    text = (
+        f"🧬 <b>fork_with_policy</b>\n"
+        f"Caller: <code>{_escape(caller_workflow)}</code> "
+        f"(<code>{_escape(caller_policy)}</code>)\n"
+        f"Child: <code>{_escape(child_workflow)}</code> "
+        f"(<code>{_escape(child_policy)}</code>, uid={child_uid})\n"
+        f"Command: <code>{_escape(command_str[:240])}</code>"
+    )
+
+    try:
+        await app_runtime.bot.send_message(
+            chat_id=chat_id, text=text, parse_mode="HTML"
+        )
+    except Exception:
+        log.exception("Failed to send fork notification to runtime channel")
+
+    log.info(
+        "fork event: %s (%s) -> %s (%s, uid=%s)",
+        caller_workflow,
+        caller_policy,
+        child_workflow,
+        child_policy,
+        child_uid,
+    )
+    return web.Response(status=200, text="noted")
 
 
 # ---------------------------------------------------------------------------
@@ -486,9 +557,20 @@ async def run() -> None:
         log.error("TELEGRAM_CHAT_ID is required")
         sys.exit(1)
 
-    # Build Telegram bot application.
+    # Build Telegram bot application (policy channel).
     telegram_app = Application.builder().token(TELEGRAM_BOT_TOKEN).build()
     telegram_app.add_handler(CallbackQueryHandler(handle_button))
+
+    # Optional runtime bot — second Telegram handle for fork/lifecycle
+    # notifications. When RUNTIME_BOT_TOKEN is unset, _handle_fork_notification
+    # falls back to the policy bot. The runtime bot has no callback handlers;
+    # its role is purely outbound telemetry.
+    runtime_app = None
+    if RUNTIME_BOT_TOKEN:
+        runtime_app = Application.builder().token(RUNTIME_BOT_TOKEN).build()
+        log.info("Runtime bot configured (separate handle for fork notifications)")
+    else:
+        log.info("Runtime bot not configured; fork notifications fall back to policy bot")
     # Capture text replies to ForceReply prompts (deny-with-reason flow).
     # Filter to text messages that are replies, so we don't process arbitrary
     # chat noise.
@@ -509,6 +591,8 @@ async def run() -> None:
     # Build HTTP server.
     http_app = web.Application()
     http_app["telegram_app"] = telegram_app
+    if runtime_app is not None:
+        http_app["runtime_app"] = runtime_app
     http_app.router.add_post("/webhook", handle_webhook)
     http_app.router.add_get("/decisions", handle_decisions)
     http_app.router.add_get("/policy-decisions", handle_policy_decisions)
@@ -519,12 +603,20 @@ async def run() -> None:
     await runner.setup()
     site = web.TCPSite(runner, LISTEN_HOST, LISTEN_PORT)
 
-    # Start both.
+    # Start both Telegram apps + HTTP server.
+    #
+    # The policy bot needs updater+polling because it receives operator input
+    # (callback queries, reply messages). The runtime bot is outbound-only
+    # (bot.send_message from the fork notification handler), so we start it
+    # WITHOUT a poller — saves Telegram long-polling quota.
     async with telegram_app:
         await telegram_app.updater.start_polling(
             allowed_updates=["callback_query", "message"]
         )
         await telegram_app.start()
+        if runtime_app is not None:
+            await runtime_app.initialize()
+            await runtime_app.start()
         await site.start()
         log.info("Approval bridge listening on %s:%d", LISTEN_HOST, LISTEN_PORT)
 
@@ -538,6 +630,9 @@ async def run() -> None:
         log.info("Shutting down...")
         await telegram_app.updater.stop()
         await telegram_app.stop()
+        if runtime_app is not None:
+            await runtime_app.stop()
+            await runtime_app.shutdown()
         await runner.cleanup()
 
 
