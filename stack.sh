@@ -864,7 +864,9 @@ cmd_sandbox_new() {
     # /sandbox/.openclaw-data/extensions/mediator-tools/ but dormant until
     # plugins.load.paths references them. We patch the config AFTER the
     # gateway has completed its startup migration — patching before startup
-    # causes a delayed crash. The gateway hot-reloads config changes.
+    # causes a delayed crash. Plugin config changes require a gateway restart
+    # (the gateway logs "config change requires gateway restart (plugins)"
+    # and does NOT hot-reload tools into the running schema).
     if openshell sandbox exec -n "$sandbox_name" -- \
             test -f /sandbox/.openclaw-data/extensions/mediator-tools/openclaw.plugin.json 2>/dev/null; then
         log "Activating mediator-tools plugin..."
@@ -876,8 +878,28 @@ cfg.setdefault('plugins', {})['load'] = {'paths': ['/sandbox/.openclaw-data/exte
 json.dump(cfg, open('/sandbox/.openclaw/openclaw.json', 'w'), indent=2)
 print('ok')
 " >/dev/null 2>&1 \
-          && log "Mediator tools plugin activated (gateway will hot-reload)" \
+          && log "Mediator tools plugin activated" \
           || log "Warning: mediator tools plugin activation failed"
+
+        # Restart openclaw gateway so the plugin's tools get registered in the
+        # live agent tool schema. Without this, the tools are loaded but not
+        # exposed to the agent session. SIGTERM triggers the gateway's
+        # built-in full-process-restart handler which re-execs with the new
+        # config — we do NOT need to spawn a replacement ourselves.
+        log "Restarting openclaw gateway to register plugin tools..."
+        openshell sandbox exec -n "$sandbox_name" -- bash -c '
+            for p in /proc/[0-9]*; do
+                cmd=$(tr "\0" " " </"$p/cmdline" 2>/dev/null)
+                case "$cmd" in
+                    openclaw-gateway*) kill -TERM "${p##*/}" 2>/dev/null; break ;;
+                esac
+            done
+        ' >/dev/null 2>&1 || true
+
+        # Give the gateway a moment to re-exec, bind its WS port, and start
+        # the telegram provider before we declare ready.
+        sleep 8
+        log "Gateway restarted with plugin tools registered"
     fi
 
     log "Sandbox ready."
@@ -1165,15 +1187,22 @@ _build_cluster_image() {
     src_hash=$(find "${OPENSHELL_DIR}/crates/openshell-sandbox/src" -name '*.rs' -exec md5 -q {} + 2>/dev/null | md5 -q 2>/dev/null || echo "default")
 
     # If source changed since last build, prune Docker build cache to force
-    # recompilation. BuildKit's layer cache won't invalidate on --mount=type=cache
-    # scope changes alone — the layer inputs (COPYd files) must differ, or the
-    # entire build cache must be purged.
+    # recompilation. BuildKit's cargo-target mount cache is keyed by Cargo.lock
+    # hash (see openshell/tasks/scripts/docker-build-image.sh — it ignores our
+    # CARGO_TARGET_CACHE_SCOPE env var and computes its own scope from
+    # LOCK_HASH+rust version). Source-only changes therefore don't invalidate
+    # the mount, and stale .rlib/binary artifacts get returned from cache.
+    # We work around this by pruning cache mounts whenever our source hash
+    # changes.
     local last_hash=""
     [[ -f "$last_hash_file" ]] && last_hash=$(cat "$last_hash_file")
     if [[ "$src_hash" != "$last_hash" ]]; then
         log "Source changed (${last_hash:0:8} → ${src_hash:0:8}), pruning Docker build cache..."
         # prune can return non-zero even when it succeeds; don't kill the script
+        # --all covers layer cache; explicit mount prune handles the cargo-target
+        # and sccache mounts that --all sometimes leaves behind.
         docker buildx prune --all --force >/dev/null 2>&1 || true
+        docker buildx prune --filter type=exec.cachemount --force >/dev/null 2>&1 || true
     fi
 
     log "Building OpenShell cluster image (source hash: ${src_hash:0:8})..."
@@ -1186,6 +1215,24 @@ _build_cluster_image() {
             CARGO_BUILD_JOBS="${CARGO_BUILD_JOBS:-4}" \
             mise exec -- ./tasks/scripts/docker-build-image.sh cluster
     )
+
+    # NemoClaw's onboard pins OPENSHELL_CLUSTER_IMAGE to
+    # `ghcr.io/nvidia/openshell/cluster:<installed_version>` (see
+    # nemoclaw/bin/lib/onboard.js getGatewayStartEnv). Without retagging, the
+    # gateway starts from the stale GHCR image and the supervisor binary is
+    # whatever NVIDIA shipped in that release — our local submodule changes
+    # don't take effect. Retag so the pinned name resolves to our fresh build.
+    local openshell_bin="${CARGO_TARGET_DIR}/release/openshell"
+    if [[ -x "$openshell_bin" ]]; then
+        local installed_ver
+        installed_ver=$("$openshell_bin" -V 2>/dev/null | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -1 || true)
+        if [[ -n "$installed_ver" ]]; then
+            local pinned_tag="ghcr.io/nvidia/openshell/cluster:${installed_ver}"
+            log "Retagging openshell/cluster:local → ${pinned_tag} for nemoclaw onboard"
+            docker tag openshell/cluster:local "$pinned_tag" >/dev/null 2>&1 || \
+                log "Warning: docker tag failed"
+        fi
+    fi
 
     # Save hash on success
     mkdir -p "$(dirname "$last_hash_file")"
