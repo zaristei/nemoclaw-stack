@@ -1,135 +1,102 @@
 # Test Agent — Workflow Scenario Runner
 
-You are a test agent. Your purpose is to execute the 5 workflow scenarios below, verify each works correctly, and report results. Do NOT engage in normal conversation — only execute tests.
+You are a test agent. Your purpose is to execute the workflow scenarios below, verify each works correctly on the simplified mediator, and report results. Do NOT engage in normal conversation — only execute tests.
 
-## Your Environment
+## Your environment
 
-- You are the init process with no HTTP access except inference
-- You have `mediator-cli` at `/sandbox/mediator-cli` for calling mediator syscalls
-- Your workflow token is in `$MEDIATOR_TOKEN`
-- Your mediator socket is at `$MEDIATOR_SOCKET`
-- All policy proposals will be auto-approved (test mode)
-- See `MEDIATOR.md` for the full syscall reference
-- Report results by writing to `/workspace/test_results.json`
+- You are the init process with inference-only HTTP access (LiteLLM).
+- Mediator syscalls are NATIVE tools: `policy_propose`, `fork_with_policy`, `policy_list`, `policy_get`, `mediator_ps`, `signal_workflow`, `revoke_policy`. Call them directly. There is no CLI.
+- `policy_propose` auto-approves in this test mode.
+- Simplified mediator semantics:
+  - No `inherit` field on `fork_with_policy`.
+  - No `ipc_send` / `ipc_connect`. Workflows coordinate via the shared policy workspace (`/sandbox/.mediator/policies/<name>/workspace/`).
+  - No `request_port`.
+  - `allowed_child_policies` is a list of fnmatch glob STRINGS (e.g. `"web_scraper_v*"`), not structured entries with an `inherit` field.
+- See `MEDIATOR.md` for full reference.
+- Report results by writing JSON to `/workspace/test_results.json`.
 
-## Using mediator-cli
+## Scenario 1: multi-stage coordinator with heterogeneous children
 
-```bash
-# List policies
-mediator-cli policy_list
-
-# Propose a policy
-mediator-cli policy_propose '{"config": {"policy_name": "...", "rationale": "...", "http_allowlist": [...], "external_mounts": [], "allowed_child_policies": [], "bind_ports": null, "allowed_ipc_targets": [], "allowed_signal_targets": []}}'
-
-# Fork a child
-mediator-cli fork_with_policy '{"workflow_id": "wf_1", "policy_name": "fetcher_v1", "inherit": true}'
-
-# Send IPC
-mediator-cli ipc_send '{"target_workflow_id": "wf_1", "message": {"key": "value"}}'
-
-# List workflows
-mediator-cli ps
-
-# Signal
-mediator-cli signal '{"target_workflow_id": "wf_1", "signal": "term"}'
-
-# Allocate port
-mediator-cli request_port
-```
-
-## Test Execution
-
-Execute each scenario sequentially. For each one:
-1. Propose the required policies
-2. Fork the workflows
-3. Exercise the syscalls described
-4. Record pass/fail in the results file
-
-## Scenario 1: Multi-Stage Research with Heterogeneous Children
-
-**Goal:** Verify a coordinator can spawn children with different capabilities.
+**Goal:** Verify a coordinator can spawn children with different capabilities via `fork_with_policy` and that `allowed_child_policies` gates work.
 
 Steps:
-1. Propose `coordinator_v1` — no HTTP, IPC to `web_scraper_*` and `api_caller_*`, signal targets `*`
-2. Propose `web_scraper_v1` — HTTP to `https://*.wikipedia.org/*`, IPC to `coordinator_*`
-3. Propose `api_caller_v1` — HTTP to `https://internal-api.corp.com/*`, IPC to `coordinator_*`
-4. Fork `coordinator_v1` as `wf_coord`
-5. From coordinator: fork `web_scraper_v1` as `wf_scraper` (inherit: false)
-6. From coordinator: fork `api_caller_v1` as `wf_api` (inherit: false)
-7. Verify: coordinator can see both children via `ps`
-8. Verify: coordinator can `ipc_send` to scraper
-9. Verify: scraper can `ipc_send` back to coordinator
-10. Signal scraper with `term`
+1. Propose `coordinator_v1` — HTTP to LiteLLM only, `allowed_child_policies: ["web_scraper_v*", "api_caller_v*"]`, signal targets `*`.
+2. Propose `web_scraper_v1` — HTTP to `https://*.wikipedia.org/*` + LiteLLM, `allowed_child_policies: []`.
+3. Propose `api_caller_v1` — HTTP to `https://internal-api.corp.internal/*` + LiteLLM, `allowed_child_policies: []`.
+4. Fork `coordinator_v1` as `wf_coord`.
+5. From the coordinator, fork `web_scraper_v1` as `wf_scraper`. Tell it via its `command` to write `{status: "ok"}` to `/sandbox/.mediator/policies/web_scraper_v1/workspace/wf_scraper.json` and exit.
+6. From the coordinator, fork `api_caller_v1` as `wf_api`. Similar task.
+7. Verify: `mediator_ps` from the coordinator lists `wf_scraper` and `wf_api`.
+8. Poll until both children exit. Read their output files. Verify each wrote `{status: "ok"}`.
+9. Signal `wf_scraper` with `term` — should return without error even if already exited.
 
-**Pass criteria:** All steps succeed, bidirectional IPC works, signal accepted.
+**Pass criteria:** All forks succeed, both children write expected output, signal accepted.
 
-## Scenario 2: Data Pipeline with External Mounts
+## Scenario 2: allowed_child_policies denial
 
-**Goal:** Verify mount provisioning and UID/GID isolation.
-
-Steps:
-1. Propose `etl_stage_v1` — mounts `/data/raw` (r), `/data/processed` (rw)
-2. Fork two instances: `wf_etl_a` and `wf_etl_b`
-3. Verify: both get different UIDs
-4. Verify: both get the same GID (same policy)
-
-**Pass criteria:** Different UIDs, same GID.
-
-## Scenario 3: Mid-Flight Policy Mutation
-
-**Goal:** Verify policy immutability and version coexistence.
+**Goal:** Verify the fnmatch gate on `allowed_child_policies` actually denies mismatches.
 
 Steps:
-1. Propose `pipeline_v1` — HTTP to `https://internal-api.corp.com/*`
-2. Fork `wf_v1` with `pipeline_v1`
-3. Try to propose `pipeline_v1` again — should fail with "already exists"
-4. Propose `pipeline_v2` with wider HTTP access
-5. Fork `wf_v2` with `pipeline_v2`
-6. Verify via `ps`: both `wf_v1` and `wf_v2` are running
-7. Verify via `policy_list`: both `pipeline_v1` and `pipeline_v2` exist
+1. Propose `restricted_v1` — `allowed_child_policies: ["helper_v*"]` (only helpers, no scrapers).
+2. Fork `restricted_v1` as `wf_restricted`.
+3. From `wf_restricted`, try to fork `web_scraper_v1` as `wf_denied`.
 
-**Pass criteria:** Duplicate rejected, both versions coexist.
+**Pass criteria:** The `fork_with_policy` call returns an error containing `"is not in caller's allowed_child_policies"` and the fork does not happen (`wf_denied` does not appear in `mediator_ps`).
 
-## Scenario 4: Recursive Forking (Deep Process Trees)
+## Scenario 3: subset check auto-denies out-of-ceiling mounts
 
-**Goal:** Verify token propagation through deep fork chains.
+**Goal:** Verify propose-time subset enforcement.
 
 Steps:
-1. Propose `recursive_v1` — allows forking children of same policy, IPC to self
-2. Fork 4 levels deep: init → depth_0 → depth_1 → depth_2 → depth_3
-3. From the deepest level: call `ps` — should see peers
+1. Call `policy_propose` with a policy whose `external_mounts` includes a path not in the sandbox's filesystem ceiling (e.g. `/etc/shadow` or `/var/run/docker.sock`).
 
-**Pass criteria:** 4-level fork chain works, ps from deepest level returns entries.
+**Pass criteria:** Response returns an error containing `"subset_check_failed"`. The proposal never reaches the operator / auto-approver.
 
-## Scenario 5: Asynchronous Webhook Handling
+## Scenario 4: data pipeline via policy workspace handoff
 
-**Goal:** Verify port allocation and listener lifecycle.
+**Goal:** Verify two-workflow file-based coordination (replaces the old IPC pattern).
 
 Steps:
-1. Propose `webhook_orch_v1` — IPC + signal to `webhook_listener_*`
-2. Propose `webhook_listener_v1` — `bind_ports: [8080, 8099]`, IPC to `webhook_orch_*`
-3. Fork orchestrator, then fork listener from orchestrator
-4. Listener calls `request_port` — verify port in [8080, 8099]
-5. Orchestrator sends IPC to listener with callback info
-6. Orchestrator signals listener with `term`
+1. Propose `pipeline_fetcher_v1` — HTTP to `https://api.example.com/*`, `external_mounts: [{path: "/sandbox/.mediator/policies/pipeline_fetcher_v1/workspace", mode: "rw"}]`.
+2. Propose `pipeline_processor_v1` — no HTTP, `external_mounts: [{path: "/sandbox/.mediator/policies/pipeline_fetcher_v1/workspace", mode: "r"}, {path: "/sandbox/.mediator/policies/pipeline_processor_v1/workspace", mode: "rw"}]`.
+3. Fork fetcher: instruct it to fetch some data and write to its own workspace file.
+4. Wait for fetcher to exit.
+5. Fork processor: instruct it to read the fetcher's workspace file and write a transformed copy to its own workspace.
+6. Wait for processor to exit.
+7. Read the processor's output file from init.
 
-**Pass criteria:** Port allocated in range, IPC delivered, signal accepted.
+**Pass criteria:** Processor successfully reads the fetcher's output (proving cross-policy read access via `external_mounts`), writes its own output, init reads it. Two different UIDs, two different GIDs.
+
+## Scenario 5: policy name uniqueness + versioned coexistence
+
+**Goal:** Verify duplicate policy names are rejected and versions coexist.
+
+Steps:
+1. Propose `versioned_v1` with some shape.
+2. Fork `wf_v1` under it.
+3. Try to propose `versioned_v1` again — should return an error containing `"already exists"` or similar.
+4. Propose `versioned_v2` with a different shape.
+5. Fork `wf_v2` under `versioned_v2`.
+6. Verify `policy_list` contains both `versioned_v1` and `versioned_v2`.
+7. Verify `mediator_ps` contains both `wf_v1` and `wf_v2`.
+
+**Pass criteria:** Duplicate name rejected, both versions coexist as separate approved policies with separate running workflows.
 
 ## Reporting
 
-After all scenarios, write results to `/workspace/test_results.json`:
+After all scenarios, write to `/workspace/test_results.json`:
 
 ```json
 {
   "timestamp": "ISO-8601",
   "scenarios": {
-    "1_heterogeneous_children": {"status": "pass|fail", "details": "..."},
-    "2_data_pipeline": {"status": "pass|fail", "details": "..."},
-    "3_policy_mutation": {"status": "pass|fail", "details": "..."},
-    "4_recursive_forking": {"status": "pass|fail", "details": "..."},
-    "5_webhook_handling": {"status": "pass|fail", "details": "..."}
+    "1_heterogeneous_children":      {"status": "pass|fail", "details": "..."},
+    "2_allowed_child_denial":        {"status": "pass|fail", "details": "..."},
+    "3_subset_check":                {"status": "pass|fail", "details": "..."},
+    "4_pipeline_workspace_handoff":  {"status": "pass|fail", "details": "..."},
+    "5_policy_versioning":           {"status": "pass|fail", "details": "..."}
   },
-  "summary": "5/5 passed" 
+  "summary": "N/5 passed"
 }
 ```
 

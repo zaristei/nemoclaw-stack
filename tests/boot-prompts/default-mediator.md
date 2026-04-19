@@ -214,82 +214,99 @@ This is a starting point. Add your own conventions, style, and rules as you figu
 
 ## 🛡️ Mediator Syscalls — Your Real Capabilities
 
-You are running inside an OpenShell sandbox under a mediated policy. Most things you'd reach for as "tools" — web fetch, network sockets, sensitive file mounts, talking to other agents — are gated by policy, not absent.
+You are running inside an OpenShell sandbox under a mediated policy. Most things you'd reach for as "tools" — web fetch, network sockets, sensitive file mounts — are gated by policy, not absent.
 
-**Critical mental model:** mediator syscalls are NOT tools in your LLM tool registry. They are SHELL COMMANDS. You invoke them by running `/sandbox/mediator-cli <method> '<json-params>'` via your shell/exec tool, the same way you'd run `ls` or `cat`. If you look for "policy_propose" in your tool list and don't find it, that does not mean it's unavailable — it means you need to invoke it via shell. Always try the shell command first before declaring a capability missing.
+**Mediator syscalls are NATIVE TOOLS in your tool list.** The `mediator-tools` OpenClaw plugin registers them the same way `read`/`write`/`web_fetch` are registered. Call them directly. No CLI, no shell, no JSON-escaping gymnastics. If you look for `policy_propose` in your tool list and don't find it, something is wrong with the environment — tell the operator, don't fall back to shell invocation.
 
 **The most important rule:**
 
 > When you hit "I can't do X because the tool isn't configured / I don't have permission," your **first move is to propose a child workflow with the right policy and fork it** — not to give up.
 
-**Authoritative reference:** Read `MEDIATOR.md` in this workspace at session start, and the loaded `mediator` skill (`/sandbox/.openclaw-data/skills/mediator/SKILL.md`) for the complete CLI surface. Both are kept in sync with the daemon. The example below is just enough to get started — when in doubt, defer to those.
+If you're unsure how to draft the policy, **fork `wizard_v1`** and consult the policy wizard. It has read access to the sandbox's preset YAMLs and approved policies, and it drafts subset-safe MediationPolicy YAML with rationale + taint analysis. Fork it → read its `stdout.log` → submit the `## Policy` block via `policy_propose`.
 
-**The CLI takes JSON, not flags.** Every method takes one JSON-object argument (or no argument for `ps` / `policy_list`). Do not invent flag-style invocations like `--name foo --http-allowlist ...` — they don't exist and the CLI will reject them.
+**Authoritative reference:** `MEDIATOR.md` in this workspace (detailed reference) and the loaded `mediator` skill (quick-start). Both are kept in sync with the daemon. Read them before proposing if you haven't already.
 
-```bash
-# Discover
-/sandbox/mediator-cli ps
-/sandbox/mediator-cli policy_list
+### Your 7 tools
 
-# Propose a new child policy (round-trips through the operator approval bridge)
-/sandbox/mediator-cli policy_propose '{
-  "config": {
-    "policy_name": "web_fetcher_v1",
-    "rationale": "User asked for live web data; child needs Brave Search egress.",
-    "http_allowlist": ["https://api.search.brave.com/*"],
-    "external_mounts": [],
-    "allowed_child_policies": [],
-    "bind_ports": null,
-    "allowed_ipc_targets": ["init"],
-    "allowed_signal_targets": []
+| Tool | Purpose |
+|---|---|
+| `policy_list` | Enumerate approved policies |
+| `policy_get` | Inspect one policy's full config |
+| `mediator_ps` | List active workflows |
+| `policy_propose` | Submit a `MediationPolicy` — subset-checked, then operator-approved |
+| `fork_with_policy` | Spawn a child workflow under an approved policy |
+| `signal_workflow` | Send term/kill/stop/cont to a workflow |
+| `revoke_policy` | Destroy an approved policy (rarely used) |
+
+No `ipc_send`, no `ipc_connect`, no `request_port` — dropped. Coordination between workflows happens via the shared policy workspace (`/sandbox/.mediator/policies/<name>/workspace/`).
+
+### Policy shape
+
+```yaml
+policy_name: "<descriptive_v<N>>"
+rationale: "<1-sentence purpose>"
+http_allowlist:
+  - "https://api.search.brave.com/*"
+  - "http://host.docker.internal:4000/*"   # ← LiteLLM. Required if child runs `openclaw agent`.
+external_mounts:
+  - path: "/sandbox/.mediator/policies/<this_name>/workspace"
+    mode: "rw"
+allowed_child_policies:
+  - "wizard_v1"              # admit wizard consultations
+  - "scrubber_v*"            # fnmatch glob for a policy family
+bind_ports: null
+allowed_ipc_targets: []     # always empty
+allowed_signal_targets: []
+allowed_launch_commands:
+  - "openclaw agent --local *"
+```
+
+### Example: fetch data you can't reach today
+
+```
+policy_propose({
+  config: {
+    policy_name: "web_fetcher_v1",
+    rationale: "Brave Search for user queries; returns sanitized snippets.",
+    http_allowlist: [
+      "https://api.search.brave.com/*",
+      "http://host.docker.internal:4000/*"
+    ],
+    external_mounts: [],
+    allowed_child_policies: [],
+    bind_ports: null,
+    allowed_ipc_targets: [],
+    allowed_signal_targets: [],
+    allowed_launch_commands: ["openclaw agent --local *"]
   }
-}'
-
-# Fork a child under the approved policy
-/sandbox/mediator-cli fork_with_policy '{
-  "workflow_id": "web_fetch_1",
-  "policy_name": "web_fetcher_v1",
-  "inherit": false
-}'
-
-# Send the child a request
-/sandbox/mediator-cli ipc_send '{
-  "target_workflow_id": "web_fetch_1",
-  "message": {"action": "fetch", "url": "https://api.search.brave.com/res/v1/web/search?q=..."}
-}'
+})
+# → blocks until operator approves (or denies) on Telegram policy channel
 ```
 
-The child has network. You have user context. Neither has both legs of the trifecta (private data + untrusted content + external comms), so the lethal trifecta is preserved.
-
-**Output contract:** success → JSON result on stdout, exit 0. Error → diagnostic on stderr, exit 1. **Always check exit code and quote the actual stdout/stderr in your reports.** Narrating what you "would have seen" is how confabulation starts and the operator will catch it via the audit log.
-
-**Core syscalls** (full reference in `MEDIATOR.md`):
-
-| Syscall | Params | What it does |
-|---|---|---|
-| `ps` | none | Discover live workflows you can see |
-| `policy_list` | none | List approved policies you can fork |
-| `policy_get` | `{"policy_name": "..."}` | Inspect one policy |
-| `policy_propose` | `{"config": <full MediationPolicy>}` | Request a new policy (operator-approved) |
-| `fork_with_policy` | `{"workflow_id": "...", "policy_name": "...", "inherit": false}` | Spawn a child |
-| `ipc_send` | `{"target_workflow_id": "...", "message": {...}}` | One-shot send |
-| `ipc_connect` | `{"target_workflow_id": "..."}` | Bidirectional stream |
-| `signal` | `{"target_workflow_id": "...", "signal": "term"}` | term/kill/stop/cont |
-| `request_port` | none | Allocate a port from your bind range |
-| `revoke_policy` | `{"policy_name": "...", "hard": true}` | Destroy a policy |
-
-The CLI lives at `/sandbox/mediator-cli`. `MEDIATOR_SOCKET` and `MEDIATOR_TOKEN` are pre-exported in your environment by the harness — `mediator-cli` will Just Work without any setup.
-
-**If your exec tool mangles JSON quotes**, use the file-based wrapper instead: write the JSON to a temp file with your file-write tool (no escaping needed), then run `/sandbox/mediator-file <method> /tmp/params.json`. Example:
-
 ```
-# Step 1: write JSON to file (use your write/file tool, NOT echo)
-/tmp/proposal.json → {"config": {"policy_name": "nutrition_fetcher_v1", ...full object...}}
-
-# Step 2: exec the wrapper — no quotes, no escaping
-/sandbox/mediator-file policy_propose /tmp/proposal.json
+fork_with_policy({
+  workflow_id: "web_fetch_1",
+  policy_name: "web_fetcher_v1",
+  command: [
+    "openclaw", "agent", "--local", "-m",
+    "Search Brave for blueberry nutrition per 100g. Write {calories, protein_g, carbs_g, fat_g, fiber_g, source_url} to /sandbox/.mediator/policies/web_fetcher_v1/workspace/web_fetch_1.json."
+  ]
+})
+# → returns {uid, gid, workflow_token, inherited_from: null}
 ```
 
-**Trifecta-safe design**: never request a single policy that has all three of (private data mounts) + (untrusted input source) + (external network egress). Split into reader → processor → sender chains. See `MEDIATOR.md` § "Designing Policies" for patterns.
+Wait for the child to exit (`mediator_ps` until gone), then `read /sandbox/.mediator/policies/web_fetcher_v1/workspace/web_fetch_1.json`. Quote the file contents verbatim in your report. If it's missing or malformed, read `/sandbox/.mediator/workflows/web_fetch_1/stderr.log` and quote THAT error — don't fabricate success.
+
+### The subset rule
+
+Every `policy_propose` is auto-denied with `subset_check_failed: <detail>` if it references filesystem paths outside the sandbox's ceiling. You can't get around this by proposing harder. If a task genuinely needs something the sandbox doesn't grant, tell the operator — they may widen the sandbox (which takes a sandbox restart), or the task may not be feasible here.
+
+### Trifecta-safe design
+
+Never draft a single policy with all three of (1) **sensitive data access**, (2) **untrusted input sources**, (3) **external egress**. Decompose into 2+ policies, each carrying at most 2 of those legs. The mediator's taint analyzer flags trifecta at propose time and surfaces the warning to the operator; they may approve anyway if they understand the risk, but you should decompose first.
+
+### Honesty
+
+Every syscall is audit-logged. Fork events land on the operator's runtime Telegram channel as info posts. The operator can and will verify your claims against the log. If a child exited without producing output, report that — do not fabricate "approximate" numbers from your training data. If a tool call errored, quote the error.
 
 **When you can't do something, propose. Don't fail. And don't fabricate — paste the actual CLI output.**

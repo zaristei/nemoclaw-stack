@@ -1,201 +1,223 @@
 # Mediator Syscall Guide for Autonomous Agents
 
-You operate inside a sandboxed process managed by the mediator — a policy-enforced control plane that governs all cross-boundary actions. Every external operation you perform is mediated, audit-logged, and checked against your approved policy. This document teaches you how to use the syscall API and design safe policies.
+You operate inside a sandboxed process managed by the mediator — a policy-enforced control plane that governs cross-boundary actions. This is the reference guide for the syscall API. Start here when you need capabilities your current policy doesn't cover.
 
-## Non-Negotiable Rule
+For a quick-start (what the tools do, minimal examples), see `skills/mediator/SKILL.md`. This guide goes deeper into semantics.
 
-**Every policy whose `allowed_launch_commands` includes `/sandbox/agent-bootstrap.sh` MUST include `http://host.docker.internal:4000/*` in its `http_allowlist`.**
+## Non-negotiable rule
 
-That endpoint is LiteLLM, the inference proxy. The child agent spawned by `agent-bootstrap.sh` runs `openclaw agent --local` which calls LiteLLM for every reasoning step. Without it, every child fails with "LLM request failed: network connection error". If you propose a policy without this endpoint, expect rejection.
+**Every policy whose `allowed_launch_commands` runs `openclaw agent --local` MUST include `http://host.docker.internal:4000/*` in its `http_allowlist`.** That endpoint is LiteLLM (the inference proxy). Without it, the child's every reasoning turn fails with "LLM request failed".
 
-## Your Identity
+## Your identity
 
-- You run as a unique Linux UID inside a sandbox
-- You have a `workflow_token` (HMAC) that authenticates every syscall
-- Your capabilities are defined by your **policy** — an immutable, versioned document approved by a human operator
-- You can discover other workflows, but only those your policy allows you to see
-- All your actions are recorded in an audit log
-- **You have no HTTP access as init.** Your base policy has an empty `http_allowlist`. To reach any external service, fork a child under a policy that allows it.
-- **You coordinate children via shared files.** Give each child a task that instructs it to write output to a specific path, then poll `mediator_ps` until the child exits, then use the `read` tool on the output path. IPC syscalls (`ipc_send`, `ipc_connect`) exist but are not wired for async result delivery — don't use them.
+- You run as a unique Linux UID inside a sandbox.
+- You have a `workflow_token` (HMAC) that authenticates every syscall.
+- Your capabilities come from your **policy** — an immutable, versioned document the operator approved. You inherit no policy from your parent at runtime; every workflow's policy subset-checks against the live sandbox ceiling directly.
+- All your syscalls are audit-logged. Fork events land on the operator's **runtime Telegram channel** as an info post (not a prompt). Policy proposals land on the **policy Telegram channel** and block on operator approval.
 
-## How You Acquire Capabilities
+## How you acquire capabilities
 
-You start with almost nothing. Your base policy (`init_v0`) defines a narrow set of permissions. Most operations you try will be denied at first. This is by design — the sandbox defaults to deny, and you build up capabilities by proposing new policies and forking children under them.
+You start with your policy (either `init_v0` for the root coordinator or `initial_agent_policy_v1` for the main agent). When a task needs capabilities outside that policy:
 
-### The Capability Acquisition Loop
+1. **Read the task.** What external service does it need? What data does it read or write?
+2. **Check existing policies.** Call `policy_list`. Reuse if something fits.
+3. **If nothing fits, either consult the wizard or draft directly.** If the policy shape is unfamiliar — new preset, taint concerns, trifecta risk — fork `wizard_v1` and ask it to draft. If you know the shape, draft directly.
+4. **Propose.** Call `policy_propose` with the drafted `MediationPolicy`. The mediator subset-checks against the sandbox ceiling (auto-deny if paths are outside), then the operator approves on Telegram.
+5. **Fork.** `fork_with_policy` creates the child workflow. Your policy's `allowed_child_policies` must admit the target (fnmatch); otherwise auto-deny.
+6. **Wait + read.** Poll `mediator_ps` until the child exits, then read its output from `/sandbox/.mediator/policies/<policy_name>/workspace/`.
 
-1. **Read the task.** What external service does it require? What data does it write and where?
-2. **Check existing policies.** Call `policy_list`. If one covers the subtask, reuse it via `fork_with_policy`. Don't propose duplicates.
-3. **Propose what's missing.** Call `policy_propose`. The operator sees the proposal on Telegram and approves or rejects. You wait.
-4. **Fork.** Call `fork_with_policy` with `command: ["/sandbox/agent-bootstrap.sh", "<task description with output path>"]`.
-5. **Wait.** Poll `mediator_ps` every few seconds until the child's workflow_id disappears from the list.
-6. **Read.** Use the `read` tool on the path you told the child to write.
-
-A denial is not an error — it's information telling you what capability to acquire next.
-
-### When to Fork vs. Propose vs. Just Do It
-
-| Situation | Action |
-|-----------|--------|
-| Your policy already covers the operation | Just do it |
-| An approved policy exists for the subtask | `fork_with_policy` (instant) |
-| No suitable policy exists | `policy_propose` (needs operator approval) |
-| You're about to combine all 3 trifecta legs | Split into 2+ policies, fork a chain |
-| A child is stuck or misbehaving | `signal` term/kill |
-
-## The 10 Syscalls
+## The 7 syscalls
 
 ### Discovery
 
-**`policy_list`** — See approved policies visible to you. Check this before proposing to avoid duplicates.
+**`policy_list`** — enumerate approved policies.
 
 ```json
 {"method": "policy_list", "params": {}}
-→ [{"policy_name": "fetcher_v1", "rationale": "Web content fetcher"}, ...]
+→ [{"policy_name": "web_fetcher_v1", "rationale": "Web content fetcher"}, ...]
 ```
 
-**`policy_get`** — Full config for one policy. Use this to check the allowlist before forking.
+**`policy_get`** — full config for one policy.
 
 ```json
-{"method": "policy_get", "params": {"policy_name": "fetcher_v1"}}
-→ {"policy_name": "fetcher_v1", "http_allowlist": [...], ...}
+{"method": "policy_get", "params": {"policy_name": "web_fetcher_v1"}}
+→ {"policy_name": "web_fetcher_v1", "http_allowlist": [...], ...}
 ```
 
-**`mediator_ps`** — List active workflows. Poll this while waiting for a child to finish. When your child's `workflow_id` is gone from the list, the child exited.
+**`mediator_ps`** — list active workflows. Poll this while waiting for a child to finish. When the child's `workflow_id` is gone, it exited.
 
 ```json
 {"method": "mediator_ps", "params": {}}
-→ [{"workflow_id": "fetch_1", "policy_name": "fetcher_v1"}]
+→ [{"workflow_id": "fetch_1", "policy_name": "web_fetcher_v1", "uid": 100042}]
 ```
 
-### Policy Lifecycle
+### Policy lifecycle
 
-**`policy_propose`** — Request a new policy. Operator reviews on Telegram.
+**`policy_propose`** — request a new approved policy. Subset-checked against the sandbox ceiling first. Then forwarded to the operator via the policy channel for approval.
 
 ```json
-{"method": "policy_propose", "params": {
-  "config": {
-    "policy_name": "web_fetcher_v1",
-    "rationale": "Web lookups via Brave Search, writes to policy workspace",
-    "http_allowlist": [
-      "http://host.docker.internal:4000/*",
-      "https://api.search.brave.com/*"
-    ],
-    "external_mounts": [],
-    "allowed_child_policies": [],
-    "bind_ports": null,
-    "allowed_ipc_targets": [],
-    "allowed_signal_targets": [],
-    "allowed_launch_commands": ["/sandbox/agent-bootstrap.sh *"]
+{
+  "method": "policy_propose",
+  "params": {
+    "config": {
+      "policy_name": "web_fetcher_v1",
+      "rationale": "Fetch data via Brave search API",
+      "http_allowlist": [
+        "https://api.search.brave.com/*",
+        "http://host.docker.internal:4000/*"
+      ],
+      "external_mounts": [],
+      "allowed_child_policies": [],
+      "bind_ports": null,
+      "allowed_ipc_targets": [],
+      "allowed_signal_targets": [],
+      "allowed_launch_commands": ["openclaw agent --local *"]
+    }
   }
-}}
+}
 ```
 
-**`revoke_policy`** — Remove an approved policy (init only).
+**`revoke_policy`** — remove an approved policy. Init-only in most deployments.
 
-### Process Management
+### Process
 
-**`fork_with_policy`** — Spawn a child workflow under a policy. The child gets its own UID, a per-policy workspace at `/sandbox/.mediator/policies/<policy_name>/workspace/` that both you and the child can read/write, and a fresh `openclaw agent --local` process running the command.
-
-Always use `inherit: true` and `command: ["/sandbox/agent-bootstrap.sh", "<task>"]`. The task string should include the exact output path you want the child to write.
+**`fork_with_policy`** — spawn a child workflow under an approved policy. Returns immediately with the child's UID + GID + `workflow_token`.
 
 ```json
-{"method": "fork_with_policy", "params": {
-  "workflow_id": "fetch_1",
-  "policy_name": "web_fetcher_v1",
-  "inherit": true,
-  "command": [
-    "/sandbox/agent-bootstrap.sh",
-    "Use your web_search tool to look up apple nutrition per 100g. Write {calories, protein_g, carbs_g, fat_g, fiber_g, source_url} as JSON to /sandbox/.mediator/policies/web_fetcher_v1/workspace/fetch_1.json using the write tool."
-  ]
-}}
-→ {"uid": 100042, "gid": 70003, "workflow_token": "hex..."}
+{
+  "method": "fork_with_policy",
+  "params": {
+    "workflow_id": "fetch_1",
+    "policy_name": "web_fetcher_v1",
+    "command": [
+      "openclaw", "agent", "--local", "-m",
+      "Fetch nutrition for apples per 100g. Write to /sandbox/.mediator/policies/web_fetcher_v1/workspace/fetch_1.json."
+    ]
+  }
+}
+→ {"uid": 100042, "gid": 70003, "workflow_token": "hex...", "inherited_from": null}
 ```
 
-**`signal`** — Send a control signal (`term`, `kill`, `stop`, `cont`) to a workflow. Your policy's `allowed_signal_targets` must list the target's policy.
+The `inherited_from` field in the response is always `null` in the simplified mediator — retained for wire compat only.
 
-**`request_port`** — Allocate a port from your policy's `bind_ports` range.
+**Gates on `fork_with_policy`:**
+- Target `policy_name` must already be approved (appears in `policy_list`).
+- Your own policy's `allowed_child_policies` must include (exact or fnmatch glob match) the target name. Otherwise: `policy 'X' is not in caller's allowed_child_policies (patterns=[...])`.
+- Target's `allowed_launch_commands`, if non-empty, must admit the `command` you pass.
 
-### IPC (not functional — don't use)
+**`signal`** — send `term`/`kill`/`stop`/`cont` to a workflow. Gated by your policy's `allowed_signal_targets` (which policy names you can signal, and which signal types).
 
-`ipc_send` and `ipc_connect` are present in your tool list but are not a working coordination mechanism yet. Do not use them. Use file-based coordination via the policy workspace.
+## Policy shape (`MediationPolicy`)
 
-## File-Based Coordination
+```yaml
+policy_name: "<descriptive_name_v<N>>"  # globally unique, versioned
+rationale: "<1-sentence purpose for operator review>"
 
-Each policy has a workspace at `/sandbox/.mediator/policies/<policy_name>/workspace/`. Child processes under that policy can write there (their UID owns it via GID). You can read it as init.
+http_allowlist:
+  - "<fnmatch glob URL>"
 
-**Single-child pattern:**
+external_mounts:
+  - path: "<absolute path under sandbox ceiling>"
+    mode: "<r | rw | rx | rwx>"
 
-1. `fork_with_policy` a child. Include the exact write path in its task description.
-2. Poll `mediator_ps` until the child's `workflow_id` is gone.
-3. `read` the file at the path you told the child to write.
+# fnmatch glob patterns matched against target policy names at fork time
+allowed_child_policies:
+  - "wizard_v1"           # explicit name
+  - "fetcher_v*"          # glob for version family
+  # [] = this policy's workflows may not fork children
 
-**Multi-child chain (for trifecta-risky tasks):**
+bind_ports: null  # usually null; set only if the workflow actually listens
 
-1. Fork fetcher → writes raw data to `/sandbox/.mediator/policies/fetcher_v1/workspace/<workflow_id>.json`
-2. Wait for fetcher to exit.
-3. Fork scrubber → reads the fetcher's file, validates/cleans, writes to its own workspace.
-4. Wait for scrubber to exit.
-5. You read the scrubber's clean output.
+allowed_ipc_targets: []  # always empty; IPC was removed
 
-## The Lethal Trifecta
+allowed_signal_targets:
+  - policy_name: "<fnmatch>"
+    signals: ["term", "kill"]
 
-A policy triggers a trifecta violation when it simultaneously has:
-
-1. **Private data access** — mounts to paths tagged as sensitive
-2. **Untrusted content** — HTTP to untrusted sources or inbound ports
-3. **External communication** — HTTP to endpoints not trusted for that data type
-
-**Rule:** never combine all three legs in one policy. If a task requires it, split across cooperating workflows.
-
-### Fetcher → Scrubber Pattern
-
-Use this when untrusted web content must influence sensitive output.
-
-```
-fetcher_v1 (has web access, no sensitive mounts)
-  └─ writes raw fetch result to policy workspace
-
-scrubber_v1 (no web access, reads fetcher workspace)
-  └─ validates structure, strips instructions/HTML
-  └─ writes clean JSON to its own policy workspace
-
-you (init)
-  └─ reads only the scrubber's clean output
+allowed_launch_commands:
+  - "<fnmatch glob>"  # must match the command passed to fork_with_policy
 ```
 
-The scrubber's `http_allowlist` must still contain `http://host.docker.internal:4000/*` (it needs LiteLLM to think), but no other web endpoints.
+## The subset rule
 
-## Worked Example: Nutrition Lookup
+Every proposed policy is a strict subset of the sandbox's ceiling. Specifically:
 
-Task: *"Fetch nutrition info for an apple from a reputable source."*
+- **Filesystem** (checked at propose time): every `external_mount.path` must be a subpath of some entry in the sandbox's `FilesystemPolicy.read_only ∪ read_write`. Component-wise prefix (so `/workspace/fetcher` ⊆ `/workspace` but `/workspace-other` is NOT). Failing the subset check returns `subset_check_failed: <detail>` — no bridge call, no operator involvement.
+- **Network** (enforced at runtime by the L7 proxy): each URL your child tries to reach is checked against your policy's `http_allowlist` + the sandbox's underlying `NetworkPolicy`. Out-of-ceiling hosts get CONNECT-denied at runtime. Your proposal isn't blocked at propose time for network, but the child's traffic won't flow.
+- **Mount changes require sandbox restart.** You cannot propose a policy that adds a new hostPath mount not already in the sandbox ceiling. Ask the operator to expand the sandbox (which they do via the OpenShell draft flow), then re-propose.
 
-**Step 1 — policy_list:** Check for an existing web fetcher policy. If one exists with `http://host.docker.internal:4000/*` and `https://api.search.brave.com/*` in its allowlist, skip to Step 3.
+## The policy wizard
 
-**Step 2 — policy_propose:** Propose `web_fetcher_v1` with the allowlist above, `allowed_launch_commands: ["/sandbox/agent-bootstrap.sh *"]`, and everything else empty. Wait for operator approval.
-
-**Step 3 — fork_with_policy:**
+When you're not sure how to draft — new endpoint, shaping concerns, trifecta risk — fork `wizard_v1`:
 
 ```json
-{"workflow_id": "apple_fetch_1", "policy_name": "web_fetcher_v1", "inherit": true,
- "command": ["/sandbox/agent-bootstrap.sh",
-   "Use your web_search tool to find apple nutrition per 100g from a reputable source. Write {calories, protein_g, carbs_g, fat_g, fiber_g, source_url} to /sandbox/.mediator/policies/web_fetcher_v1/workspace/apple_fetch_1.json using the write tool. Do not use exec or curl."]}
+{
+  "method": "fork_with_policy",
+  "params": {
+    "workflow_id": "wizard_consult_<N>",
+    "policy_name": "wizard_v1",
+    "command": [
+      "openclaw", "agent", "--local", "-m",
+      "<your context + request>"
+    ]
+  }
+}
 ```
 
-**Step 4 — poll:** Call `mediator_ps` every 10s until `apple_fetch_1` is no longer in the list.
+The wizard reads sandbox state (preset YAMLs, approved policies), reasons via LiteLLM, and writes a drafted `MediationPolicy` YAML in its stdout log. You read it from `/sandbox/.mediator/workflows/wizard_consult_<N>/stdout.log`. The wizard's output has a `## Policy` fenced YAML block you can extract and submit via `policy_propose`.
 
-**Step 5 — read:** Use the `read` tool on `/sandbox/.mediator/policies/web_fetcher_v1/workspace/apple_fetch_1.json`. Report the contents verbatim. Do not paraphrase. If the file is empty or malformed, check `/sandbox/.mediator/workflows/apple_fetch_1/stderr.log`.
+The wizard's own policy:
+- HTTP: LiteLLM only.
+- Filesystem: read-only on the sandbox baseline; write to its own workspace.
+- No binds, no signals, no children.
+- Stateless across invocations — each fork is a fresh agent process.
 
-## Policy Design Checklist
+To fork the wizard, your own policy must include `"wizard_v1"` (or a glob that matches) in `allowed_child_policies`.
 
-1. **Name with versions:** `research_scraper_v1`, `data_etl_v2`. Never reuse names.
-2. **Write a clear rationale.** The operator reads this on Telegram when deciding.
-3. **Always include `http://host.docker.internal:4000/*`** in the allowlist for any policy running `agent-bootstrap.sh`.
-4. **Minimize HTTP allowlists.** Specific patterns only, never `*`.
-5. **Keep `external_mounts`, `allowed_child_policies`, `allowed_ipc_targets`, `allowed_signal_targets`, `bind_ports`** empty/null unless explicitly needed.
-6. **`allowed_launch_commands`** must be `["/sandbox/agent-bootstrap.sh *"]` for policies that run agents. Nothing else.
-7. **Use `inherit: true`** when forking.
+## The trifecta rule
+
+A single policy must NOT have all three of:
+
+1. **`pii` sensitive data access** (reads or writes)
+2. **`untrusted` inputs** (content from outside the trust boundary — web pages, user messages, etc.)
+3. **`external` egress** (HTTP to endpoints not otherwise trusted for this data type)
+
+The mediator's taint analyzer flags trifecta combinations at `policy_propose` time and surfaces them to the operator on the policy channel. The operator may approve anyway (if the task genuinely requires it), or ask the wizard to redraft.
+
+Typical trifecta decomposition:
+
+| Policy | Legs | Role |
+|---|---|---|
+| `fetcher_v1` | untrusted + external | Fetches raw content from untrusted web sources |
+| `processor_v1` | untrusted + pii | Reads fetcher's output, sanitizes, writes to pii-accessible path |
+| `egress_v1` | trusted + pii + external | Reads clean output, posts to trusted external system |
+
+Each is 2-legged. No single workflow holds the 3.
+
+## Coordinating between workflows
+
+IPC was removed. Coordination happens via the shared policy workspace:
+
+- Each approved policy has `/sandbox/.mediator/policies/<policy_name>/workspace/` accessible by that policy's GID.
+- Children write output to a path their task instructions specify (include the full path in the `command` you send on fork).
+- The caller polls `mediator_ps`; when the child's `workflow_id` disappears, it exited.
+- Caller reads the output file from the workspace.
+
+For multi-stage pipelines (fetcher → processor), use two separate policy workspaces; the processor's policy grants read access to the fetcher's workspace via `external_mounts`.
+
+## Failure modes
+
+| Error | Meaning | Action |
+|---|---|---|
+| `subset_check_failed: external_mount '<path>' is not a subpath of ...` | Your proposed path is outside the sandbox's filesystem ceiling | Narrow the path, or ask the operator to expand the sandbox |
+| `policy 'X' is not in caller's allowed_child_policies (patterns=[...])` | Your own policy doesn't admit forking that target | Propose widening your own policy; operator approves |
+| `policy_propose` returns denied with reason | Operator rejected | Read the reason, revise the proposal (or consult wizard) |
+| Approval times out | Operator didn't respond within bridge timeout | Retry later; the policy is NOT pre-approved |
+| Child exits without writing expected file | Crashed early | Read `/sandbox/.mediator/workflows/<workflow_id>/stderr.log` |
+| `fork_with_policy` succeeds but child traffic blocked at runtime | Child's URL not in sandbox's L7 allowlist | Propose widening either your child's policy or the sandbox ceiling |
 
 ## Honesty
 
-Every syscall is audit-logged. The operator can and will verify your claims against the audit log and iptables counters. If `mediator_ps` shows a child exited in 0.2 seconds with 0 bytes through the proxy, that child did nothing — don't report its "results". If a child's `stderr.log` shows an error, report the error, don't fabricate a success.
+Every syscall is audit-logged. The operator can (and does) verify claims against the log and iptables counters. If `mediator_ps` shows a child exited in 0.2 seconds with 0 bytes through the proxy, that child did nothing — don't report its "results". If a child's `stderr.log` shows an error, report the error verbatim. Do not fabricate success.
+
+The wizard is a thinking aid, not a substitute for grounding. Read before drafting. Read before reporting. Never invent.
