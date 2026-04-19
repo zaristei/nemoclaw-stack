@@ -49,3 +49,19 @@ This matters because the trifecta rule depends on scrubbers to break taint chain
 ## external_mounts enforcement
 
 TODO in fork_with_policy.rs: daemon declares mounts in policy schema but never actually sets group permissions on mount paths. Plumbing exists (`_gid`, `_external_mounts`), needs the chmod/chgrp loop.
+
+## Gateway-side policy audit log
+
+Append-only log of every policy decision and lifecycle event (propose, approve, deny, activate, deactivate, fork) persisted in the gateway DB, not just the sandbox-local mediator audit log. Gateway becomes the system-of-record across sandbox restarts and multi-sandbox deployments.
+
+Today the mediator's audit log lives inside the sandbox and dies with it. For compliance/forensics (who approved what, when, why) and cross-sandbox analysis, we need central persistence. Reference implementation exists on abandoned branch `fork/feat/mediator-fork-namespace` — migrations `004_create_policy_audit_log.sql` (postgres + sqlite) with schema: `id, sandbox_id, task_id, timestamp_ms, event_type, actor, justification, policy_version, policy_diff, context`.
+
+Requires: server-side ingestion API, mediator daemon calls it on every policy state change, operator-facing query/export tool.
+
+## Gateway-side approval webhooks
+
+Generic HTTP approval webhook mechanism registered per-sandbox in the gateway DB. Replaces our Telegram-specific Python approval bridge with a gateway-native approval loop that any external system (Slack, PagerDuty, custom dashboard, a different messaging bot) can subscribe to.
+
+Today approvals only flow through `scripts/approval-bridge.py` → Telegram. That bridge is a separate Python process that HMACs webhook payloads. Moving it into the gateway makes approval routing a first-class feature: one approval webhook URL per sandbox (with per-sandbox HMAC secret), subscribers decide policy via HTTP response, gateway enforces the decision. Reference schema on abandoned branch `fork/feat/mediator-fork-namespace` — migration `006_create_approval_webhooks.sql`: `id, sandbox_id UNIQUE, url, secret, created_at_ms, updated_at_ms`.
+
+Requires: gateway registers/stores webhook config, mediator daemon calls gateway (not bridge) on `policy_propose`, gateway fans out to registered webhook, gateway routes response back to mediator.
