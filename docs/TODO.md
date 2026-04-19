@@ -65,3 +65,20 @@ Generic HTTP approval webhook mechanism registered per-sandbox in the gateway DB
 Today approvals only flow through `scripts/approval-bridge.py` → Telegram. That bridge is a separate Python process that HMACs webhook payloads. Moving it into the gateway makes approval routing a first-class feature: one approval webhook URL per sandbox (with per-sandbox HMAC secret), subscribers decide policy via HTTP response, gateway enforces the decision. Reference schema on abandoned branch `fork/feat/mediator-fork-namespace` — migration `006_create_approval_webhooks.sql`: `id, sandbox_id UNIQUE, url, secret, created_at_ms, updated_at_ms`.
 
 Requires: gateway registers/stores webhook config, mediator daemon calls gateway (not bridge) on `policy_propose`, gateway fans out to registered webhook, gateway routes response back to mediator.
+
+## Force undici through L7 proxy via Node preload
+
+OpenClaw's `web_fetch` tool uses undici's SSRF-guarded fetch path, which pre-resolves hostnames locally instead of letting the trusted L7 proxy resolve them. Result: every `web_fetch` call in a proxy-only sandbox fails with `getaddrinfo EAI_AGAIN`. Confirmed still broken on OpenClaw `2026.4.15` (v2026.4.8's `#59007` DNS-pinning-skip fix was scoped narrower than advertised — it only covers media-understanding paths, not web_fetch's guarded dispatcher; v2026.4.14's `#52162` added the same fix to a second site, evidence the fix doesn't generalize).
+
+Workaround: drop a Node preload script that forces the process-wide undici dispatcher to a `ProxyAgent` pointing at `$HTTPS_PROXY`:
+
+```js
+// /sandbox/undici-proxy-preload.js
+const { setGlobalDispatcher, ProxyAgent } = require('undici');
+const uri = process.env.HTTPS_PROXY || process.env.HTTP_PROXY;
+if (uri) setGlobalDispatcher(new ProxyAgent({ uri, requestTls: { rejectUnauthorized: false } }));
+```
+
+Inject in `scripts/sandbox-tools/agent-bootstrap.sh` via `export NODE_OPTIONS='--require /sandbox/undici-proxy-preload.js'` before `exec openclaw agent`. Every undici call in the child OpenClaw process (including `web_fetch`'s SSRF-guarded path) routes through our L7 proxy, and the proxy does the DNS resolution.
+
+Also file upstream issue with OpenClaw: request that `web_fetch`'s SSRF-guarded fetch dispatcher honor `NODE_USE_ENV_PROXY` / `HTTPS_PROXY` the same way media-understanding now does (post-`#52162`). The monkey-patch becomes dead code once upstream merges the fix.
