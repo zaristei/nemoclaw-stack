@@ -92,3 +92,13 @@ Target: extend `NetworkEndpoint` and every filesystem entry in the policy schema
 Wizard UX: the wizard's system prompt already knows the three axes; it just needs to emit the block into the YAML when a case warrants an explicit override. Presets become simpler to author: each preset endpoint can declare its `data_flow` once, and every proposal referencing that preset inherits the tags.
 
 Migration: purely additive. Existing policies without tags continue to classify via TrustSpec; new policies can opt in per-endpoint. No schema break, no operator retraining required.
+
+## Per-UID Landlock carving as defense-in-depth on top of GID permissions
+
+Today, per-workflow filesystem isolation is enforced via POSIX group permissions: `setup_instance_dir` chgrps each `external_mount` to the child's per-policy GID and sets group-mode bits matching the policy's `mode` field (`"r"` / `"rw"` / `"rx"` / `"rwx"`). Peer children running under different GIDs can't read each other's dirs. This is the mechanism that delivers subpath carving today.
+
+Target: add a second enforcement layer via per-UID Landlock applied in `Command::pre_exec` before `setpriv` runs. Semantic benefit over permissions: children can't even `stat(2)` peer paths — the kernel returns ENOENT rather than EACCES. Hides the existence of sibling workflows entirely.
+
+Non-trivial piece: the child's Landlock ruleset must preserve the sandbox's baseline paths (`/usr`, `/lib`, `/bin`, workspace init files, etc.) so `exec` and runtime linking continue to work, while narrowing the user-visible paths to the child's declared `external_mounts`. Upstream's existing `landlock.rs::prepare` takes a `SandboxPolicy`; we'd synthesize one per child as `(sandbox.read_only + sandbox.read_write) ∪ (child.external_mounts narrowed by mode)`. Apply via `restrict_self` in a `pre_exec` closure before the `setpriv` exec.
+
+Blockers: none. All the plumbing is in place (subset check gates the child's requested paths at propose time; sandbox's baseline Landlock is already applied at startup). This is strictly a code increment on `fork_with_policy::setup_instance_dir` + `child_runner::spawn_child_process` plus tests that a child actually sees ENOENT on a peer's dir.
